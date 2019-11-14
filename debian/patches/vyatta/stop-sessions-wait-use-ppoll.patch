@@ -1,0 +1,133 @@
+From: Robert Shearman <robert.shearman@att.com>
+Date: Mon, 12 Jun 2017 12:17:02 +0100
+Subject: Swap poll() for ppoll() in OWPStopSessionsWait()
+
+---
+ owamp/api.c | 34 +++++++++++++++++++++++++++-------
+ 1 file changed, 27 insertions(+), 7 deletions(-)
+
+diff --git a/owamp/api.c b/owamp/api.c
+index 98888a5..4830012 100644
+--- a/owamp/api.c
++++ b/owamp/api.c
+@@ -1894,7 +1894,6 @@ OWPStopSessionsWait(
+         )
+ {
+     struct timespec reltime;
+-    int             timeout;
+     struct pollfd   fds[1];
+     int             rc;
+     int             msgtype;
+@@ -1906,6 +1905,7 @@ OWPStopSessionsWait(
+     uint32_t        num_sessions=0;
+     OWPTimeStamp    stoptime;
+     OWPBoolean      readstop=!(cntrl->twoway && !cntrl->server);
++    sigset_t        sigs,osigs;
+ 
+     *err_ret = OWPErrOK;
+     if(acceptval_ret){
+@@ -1922,12 +1922,27 @@ OWPStopSessionsWait(
+         return -1;
+     }
+ 
++    /*
++     * Try to ensure atomicity so that we won't block forever in the
++     * poll call if the child exits before it is called (thus
++     * delivering the SIGCHLD signal, but after OWPSessionsActive has
++     * been called.
++     */
++    sigemptyset(&sigs);
++    sigaddset(&sigs,SIGCHLD);
++
++    if(sigprocmask(SIG_BLOCK,&sigs,&osigs) != 0){
++        OWPError(cntrl->ctx,OWPErrFATAL,OWPErrUNKNOWN,"sigprocmask(): %M");
++        return -1;
++    }
++
+     if (cntrl->twoway && cntrl->server) {
+         if (!OWPSessionsActive(cntrl,acceptval) && (*acceptval)) {
+             /*
+              * Sessions completed with error - don't wait for
+              * StopSessions message, just return.
+              */
++            (void)sigprocmask(SIG_SETMASK,&osigs,NULL);
+             cntrl->state &= ~_OWPStateTest;
+             return 0;
+         }
+@@ -1936,6 +1951,7 @@ OWPStopSessionsWait(
+             /*
+              * Sessions are complete - send StopSessions message.
+              */
++            (void)sigprocmask(SIG_SETMASK,&osigs,NULL);
+             *err_ret = OWPStopSessions(cntrl,intr,acceptval);
+             return 0;
+         }
+@@ -1946,6 +1962,7 @@ OWPStopSessionsWait(
+      * return to caller.
+      */
+     if (*intr){
++        (void)sigprocmask(SIG_SETMASK,&osigs,NULL);
+         return 2;
+     }
+ 
+@@ -1956,6 +1973,7 @@ OWPStopSessionsWait(
+         if(!OWPGetTimeOfDay(cntrl->ctx,&currstamp)){
+             OWPError(cntrl->ctx,OWPErrFATAL,OWPErrUNKNOWN,
+                     "OWPGetTimeOfDay(): %M");
++            (void)sigprocmask(SIG_SETMASK,&osigs,NULL);
+             return -1;
+         }
+ 
+@@ -1966,26 +1984,24 @@ OWPStopSessionsWait(
+         else{
+             timespecclear(&reltime);
+         }
+-
+-        timeout = (reltime.tv_sec * 1000 + reltime.tv_nsec / 1000000);
+-    }else{
+-        timeout = -1;
+     }
+ 
+     fds[0].fd = cntrl->sockfd;
+     fds[0].events = POLLIN | POLLERR | POLLHUP;
+     fds[0].revents = 0;
+ AGAIN:
+-    rc = poll(fds,sizeof(fds)/sizeof(fds[0]),timeout);
++    rc = ppoll(fds,sizeof(fds)/sizeof(fds[0]),wake ? &reltime : NULL,&osigs);
+ 
+     if(rc < 0){
+         if(errno != EINTR){
+             OWPError(cntrl->ctx,OWPErrFATAL,OWPErrUNKNOWN,
+                     "select():%M");
+             *err_ret = OWPErrFATAL;
++            (void)sigprocmask(SIG_SETMASK,&osigs,NULL);
+             return -1;
+         }
+         if(wake || *intr){
++            (void)sigprocmask(SIG_SETMASK,&osigs,NULL);
+             return 2;
+         }
+ 
+@@ -2004,6 +2020,7 @@ AGAIN:
+                  * Sessions completed with error - don't wait for
+                  * StopSessions message, just return.
+                  */
++                (void)sigprocmask(SIG_SETMASK,&osigs,NULL);
+                 cntrl->state &= ~_OWPStateTest;
+                 return 0;
+             }
+@@ -2018,10 +2035,13 @@ AGAIN:
+          */
+         *err_ret = OWPStopSessions(cntrl,intr,acceptval);
+ 
++        (void)sigprocmask(SIG_SETMASK,&osigs,NULL);
+         return 0;
+     }
+-    if(rc == 0)
++    (void)sigprocmask(SIG_SETMASK,&osigs,NULL);
++    if(rc == 0){
+         return 1;
++    }
+ 
+     if(!(fds[0].revents & (POLLIN | POLLERR | POLLHUP))){
+         OWPError(cntrl->ctx,OWPErrFATAL,OWPErrUNKNOWN,

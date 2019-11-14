@@ -1,0 +1,42 @@
+From: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+Date: Mon, 12 Jun 2017 12:17:03 +0100
+Subject: Don't print OWAMP/TWAMP client usage after invalid args
+
+Prevent the usage function from printing out the usage when an
+additional message is provided.
+
+In use this means that when the user provides an invalid argument
+to a flag only the error message will be printed, not the full
+usage text.
+
+If no/incorrect flags are given or if the h or ? flags are given
+then the usage text will be printed.
+---
+ owping/owping.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/owping/owping.c b/owping/owping.c
+index efbfcc6..2061b06 100644
+--- a/owping/owping.c
++++ b/owping/owping.c
+@@ -152,7 +152,10 @@ usage(
+         const char *msg
+         )
+ {
+-    if(msg) fprintf(stderr, "%s: %s\n", progname, msg);
++    if(msg) {
++        fprintf(stderr, "%s: %s\n", progname, msg);
++        return;
++    }
+     if (!strcmp(progname, "owping") || !strcmp(progname, "twping")) {
+         fprintf(stderr,
+                 "usage: %s %s\n%s\n", 
+@@ -1579,7 +1582,7 @@ main(
+             case 'h':
+             case '?':
+             default:
+-                usage(progname, "");
++                usage(progname, NULL);
+                 exit(0);
+                 /* UNREACHED */
+         }

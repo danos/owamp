@@ -1,0 +1,31 @@
+From: Robert Shearman <robert.shearman@att.com>
+Date: Mon, 12 Jun 2017 12:17:01 +0100
+Subject: Avoid setting LOG_PERROR if being run from init script.
+
+This is also a problem when being run from an init script since it
+messes up the pretty start/stop output.
+---
+ owampd/owampd.c | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/owampd/owampd.c b/owampd/owampd.c
+index 396d6e7..ba801c4 100644
+--- a/owampd/owampd.c
++++ b/owampd/owampd.c
+@@ -1354,11 +1354,12 @@ int main(
+     opterr = optreset = optind = 1;
+ 
+     /*
+-     * Always use LOG_PERROR - if daemonizing, stderr will be closed,
+-     * and this hurts nothing. And... commandline reporting is good
+-     * until after the fork.
++     * Don't use LOG_PERROR if daemonizing - stderr will be closed,
++     * and warning messages will just mess up init.d output.
+      */
+-    syslogattr.logopt |= LOG_PERROR;
++    if(!opts.daemon){
++        syslogattr.logopt |= LOG_PERROR;
++    }
+     errhand = I2ErrOpen(progname, I2ErrLogSyslog, &syslogattr, NULL, NULL);
+     if(! errhand) {
+         fprintf(stderr, "%s : Couldn't init error module\n", progname);

@@ -1,0 +1,556 @@
+From: Robert Shearman <robert.shearman@att.com>
+Date: Mon, 12 Jun 2017 12:17:02 +0100
+Subject: Output running state into files in an operator-specified directory
+
+This allows a certain degree of observability into the state of control and
+test sessions in owampd/twampd.
+---
+ conf/owampd.conf         |   9 ++
+ conf/twampd.conf         |   9 ++
+ doc/nwampd_conf_desc.man |  10 ++
+ owamp/api.c              |  38 +++++++
+ owamp/endpoint.c         |   1 +
+ owamp/owamp.h            |  23 +++++
+ owampd/owampd.c          | 260 ++++++++++++++++++++++++++++++++++++++++++++++-
+ owampd/owampdP.h         |   1 +
+ 8 files changed, 349 insertions(+), 2 deletions(-)
+
+diff --git a/conf/owampd.conf b/conf/owampd.conf
+index d06c94e..7e52002 100644
+--- a/conf/owampd.conf
++++ b/conf/owampd.conf
+@@ -57,6 +57,15 @@ loglocation
+ # (defaults to $cwd)
+ #datadir		/big/enough
+ 
++# location for writing state files into.
++# A state file is created each time a control session is established,
++# and deleted when the control session is shut down. The state file is
++# updated in response to client events.
++# The subdirectory is cleaned each time owampd is restarted. DONT PUT
++# ANYTHING IN THERE!
++# (defaults to nothing, meaning that state files are not written)
++#runstatedir		/var/run/owamp
++
+ # authmode - uncomment to make only Open.
+ # (defaults to OAE)
+ #authmode O
+diff --git a/conf/twampd.conf b/conf/twampd.conf
+index 1bf748d..2b5eb04 100644
+--- a/conf/twampd.conf
++++ b/conf/twampd.conf
+@@ -47,6 +47,15 @@ loglocation
+ # (defaults to $cwd)
+ #datadir		/big/enough
+ 
++# location for writing state files into.
++# A state file is created each time a control session is established,
++# and deleted when the control session is shut down. The state file is
++# updated in response to client events.
++# The subdirectory is cleaned each time twampd is restarted. DONT PUT
++# ANYTHING IN THERE!
++# (defaults to nothing, meaning that state files are not written)
++#runstatedir		/var/run/twamp
++
+ # authmode - uncomment to make only Open.
+ # (defaults to OAEM)
+ #authmode O
+diff --git a/doc/nwampd_conf_desc.man b/doc/nwampd_conf_desc.man
+index e66e8e1..0367d98 100644
+--- a/doc/nwampd_conf_desc.man
++++ b/doc/nwampd_conf_desc.man
+@@ -202,6 +202,16 @@ non-root permissions. There are legitimate reasons to run
+ operating systems require root permissions to set some DSCP values
+ requested by a client.) This additional option was added to ensure
+ root permissions are only used when explicitly intended.
++.RE
++.TP
++.BI runstatedir " runstatedir"
++Directory path where running state files will be written into.  A
++state file is created each time a control session is established, and
++deleted when the control session is shut down. The state file is
++updated in response to client events.
++.RS
++.IP Default:
++Nothing, meaning that state files are not written
+ .TP
+ .BI srcnode " nodename:port"
+ Specify the address and port that \fB\*[prog]\fR will listen for requests.
+diff --git a/owamp/api.c b/owamp/api.c
+index 4830012..ad9381a 100644
+--- a/owamp/api.c
++++ b/owamp/api.c
+@@ -3939,3 +3939,41 @@ OWPSocketInterfaceBind(
+ 
+     return True;
+ }
++
++OWPBoolean
++OWPControlIterateTestSessions(
++    OWPControl cntrl, OWPIterateTestSessionsFunc func, void *context)
++{
++    const OWPTestSessionRec *tptr;
++    OWPTestSessionState state;
++    OWPBoolean          ret;
++
++    for (tptr = cntrl->tests; tptr; tptr = tptr->next) {
++        memcpy(&state.sid, &tptr->sid, sizeof(state.sid));
++        state.sender = I2AddrCopy(tptr->sender);
++        state.receiver = I2AddrCopy(tptr->receiver);
++        state.typeP = tptr->test_spec.typeP;
++        state.packet_size_padding = tptr->test_spec.packet_size_padding;
++        state.npackets = tptr->test_spec.npackets;
++        state.active = (tptr->endpoint && tptr->endpoint->child > 0);
++        state.endpoint_pid = tptr->endpoint ? tptr->endpoint->child : -1;
++
++        ret = func(&state, context);
++
++        I2AddrFree(state.sender);
++        I2AddrFree(state.receiver);
++
++        if (!ret) {
++            return False;
++        }
++    }
++
++    return True;
++}
++
++I2Addr
++OWPControlGetRemoteAddr(
++    OWPControl cntrl)
++{
++    return I2AddrCopy(cntrl->remote_addr);
++}
+diff --git a/owamp/endpoint.c b/owamp/endpoint.c
+index ddbcfa1..8d6d426 100644
+--- a/owamp/endpoint.c
++++ b/owamp/endpoint.c
+@@ -4167,6 +4167,7 @@ AGAIN:
+             if(WIFEXITED(childstatus)){
+                 ep->acceptval =
+                     (OWPAcceptType)WEXITSTATUS(childstatus);
++                ep->child = 0;
+             }
+             else{
+                 ep->acceptval = OWP_CNTRL_FAILURE;
+diff --git a/owamp/owamp.h b/owamp/owamp.h
+index 68f0627..41e9b00 100644
+--- a/owamp/owamp.h
++++ b/owamp/owamp.h
+@@ -1905,4 +1905,27 @@ OWPControlIsTwoWay(
+     OWPControl cntrl
+     );
+ 
++typedef struct{
++    OWPSID      sid;
++    I2Addr      sender;
++    I2Addr      receiver;
++    uint32_t    typeP;
++    uint32_t    packet_size_padding;
++    uint32_t    npackets;
++    OWPBoolean  active;
++    pid_t       endpoint_pid;
++} OWPTestSessionState;
++
++typedef OWPBoolean (*OWPIterateTestSessionsFunc)(
++    const OWPTestSessionState *test_state,
++    void *ctx);
++
++extern OWPBoolean
++OWPControlIterateTestSessions(
++    OWPControl cntrl, OWPIterateTestSessionsFunc func, void *context);
++
++extern I2Addr
++OWPControlGetRemoteAddr(
++    OWPControl cntrl);
++
+ #endif        /* OWAMP_H */
+diff --git a/owampd/owampd.c b/owampd/owampd.c
+index ba801c4..7d5d6de 100644
+--- a/owampd/owampd.c
++++ b/owampd/owampd.c
+@@ -45,6 +45,7 @@
+ 
+ #include "owampdP.h"
+ #include "policy.h"
++#include "fts.h"
+ 
+ #ifdef TWAMP
+ #define NWAMPD_FILE_PREFIX "twamp-server"
+@@ -108,6 +109,7 @@ usage(
+            );
+     fprintf(stderr,
+             "   -P portrange      port range for recivers to use\n"
++            "   -r runstatedir    directory to output running state into\n"
+             "   -R vardir         directory for " OWAMPD_PID_FILE " file\n"
+             "   -S nodename:port  Srcaddr to bind to\n"
+             "   -U user           Run as user \"user\" :-uid also valid\n"
+@@ -165,6 +167,223 @@ signal_catch(
+     return;
+ }
+ 
++static OWPBoolean
++WriteTestSessionState(const OWPTestSessionState *test_state, void *context)
++{
++    FILE                *state_fp = context;
++    char                remoteaddrstr[NI_MAXHOST];
++    size_t              remoteaddrstrlen;
++    char                remoteportstr[NI_MAXSERV];
++    size_t              remoteportstrlen;
++    struct sockaddr     *remoteaddr;
++    socklen_t           remoteaddrlen;
++    char                localaddrstr[NI_MAXHOST];
++    size_t              localaddrstrlen;
++    char                localportstr[NI_MAXSERV];
++    size_t              localportstrlen;
++    struct sockaddr     *localaddr;
++    socklen_t           localaddrlen;
++    const char          *state;
++    uint32_t            dscp;
++    char                sid_name[sizeof(OWPSID)*2+1];
++
++    I2HexEncode(sid_name,test_state->sid,sizeof(OWPSID));
++
++    remoteaddrstrlen = sizeof(remoteaddrstr);
++    remoteportstrlen = sizeof(remoteportstr);
++    remoteaddr = I2AddrSAddr(test_state->receiver, &remoteaddrlen);
++    if(!remoteaddr || getnameinfo(remoteaddr, remoteaddrlen,
++                        remoteaddrstr, remoteaddrstrlen,
++                        remoteportstr, remoteportstrlen,
++                        NI_NUMERICSERV | NI_NUMERICHOST) != 0){
++        return False;
++    }
++    localaddrstrlen = sizeof(localaddrstr);
++    localportstrlen = sizeof(localportstr);
++    localaddr = I2AddrSAddr(test_state->sender, &localaddrlen);
++    if(!localaddr || getnameinfo(localaddr, localaddrlen,
++                        localaddrstr, localaddrstrlen,
++                        localportstr, localportstrlen,
++                        NI_NUMERICSERV | NI_NUMERICHOST) != 0){
++        return False;
++    }
++
++    if (test_state->active) {
++        state = "ACTIVE";
++    } else {
++        state = "INACTIVE";
++    }
++
++    dscp = (test_state->typeP >> 24) & 0x3f;
++
++    fprintf(state_fp, "%s\t[%s]:%s\t[%s]:%s\t%s\t0x%x\t%d\n", sid_name,
++            localaddrstr, localportstr, remoteaddrstr, remoteportstr, state,
++            dscp, test_state->endpoint_pid);
++
++    return True;
++}
++
++static void
++WriteSessionState (OWPContext ctx, OWPControl cntrl)
++{
++    char                state_file[MAXPATHLEN];
++    FILE                *state_fp;
++    int                 rc;
++    I2Addr              remoteaddr;
++    struct sockaddr     *remoteaddrsock;
++    socklen_t           remoteaddrsocklen;
++    char                remoteaddrstr[NI_MAXHOST];
++    size_t              remoteaddrstrlen;
++    char                remoteportstr[NI_MAXSERV];
++    size_t              remoteportstrlen;
++    char                mode;
++
++    if (!opts.runstatedir) {
++        return;
++    }
++
++    /* Record the start timestamp in the info file. */
++    snprintf(state_file, sizeof(state_file), "%s" OWP_PATH_SEPARATOR "control-%d",
++             opts.runstatedir, getpid());
++    if ((state_fp = fopen(state_file, "w")) == NULL) {
++        OWPError(ctx,OWPErrWARNING, OWPErrUNKNOWN,
++                 "fopen(%s): %M", state_file);
++        return;
++    }
++
++    remoteaddrstrlen = sizeof(remoteaddrstr);
++    remoteportstrlen = sizeof(remoteportstr);
++    remoteaddr = OWPControlGetRemoteAddr(cntrl);
++    remoteaddrsock = I2AddrSAddr(remoteaddr, &remoteaddrsocklen);
++    if(!remoteaddrsock || getnameinfo(remoteaddrsock, remoteaddrsocklen,
++                            remoteaddrstr, remoteaddrstrlen,
++                            remoteportstr, remoteportstrlen,
++                            NI_NUMERICSERV | NI_NUMERICHOST) != 0){
++        I2AddrFree(remoteaddr);
++        goto cleanup;
++    }
++    I2AddrFree(remoteaddr);
++
++    switch (OWPGetMode(cntrl)) {
++    case OWP_MODE_OPEN:
++        mode = 'O';
++        break;
++    case OWP_MODE_AUTHENTICATED:
++        mode = 'A';
++        break;
++    case OWP_MODE_ENCRYPTED:
++        mode = 'E';
++        break;
++#ifdef TWAMP
++    case TWP_MODE_MIXED:
++        mode = 'M';
++        break;
++#endif
++    default:
++        OWPError(ctx,OWPErrWARNING, OWPErrUNKNOWN,
++                 "unknown mode 0x%x",OWPGetMode(cntrl));
++        goto cleanup;
++    }
++    fprintf(state_fp, "[%s]:%s\t%c\n", remoteaddrstr, remoteportstr, mode);
++
++    OWPControlIterateTestSessions(cntrl, WriteTestSessionState, state_fp);
++
++cleanup:
++    while ((rc = fclose(state_fp)) < 0 && errno == EINTR)
++        ;
++    if(rc < 0){
++        OWPError(ctx,OWPErrWARNING, OWPErrUNKNOWN,
++                 "fclose(): %M");
++    }
++}
++
++static void
++RemoveSessionState(
++    OWPContext ctx, pid_t pid
++    )
++{
++    char                state_file[MAXPATHLEN];
++
++    if (!opts.runstatedir) {
++        return;
++    }
++
++    snprintf(state_file, sizeof(state_file), "%s" OWP_PATH_SEPARATOR "control-%d",
++             opts.runstatedir, pid);
++    /*
++     * File may not exist if the connection failed at an early stage,
++     * so don't warn about this.
++     */
++    if (unlink(state_file) < 0 && errno != ENOENT) {
++        OWPError(ctx,OWPErrWARNING, OWPErrUNKNOWN,
++                 "unlink(%s): %M", state_file);
++    }
++}
++
++static OWPBoolean
++CleanSessionState(
++        OWPContext  ctx
++        )
++{
++    char        *ftsargv[2];
++    FTS         *fts;
++    FTSENT      *p;
++    OWPBoolean  ret=False;
++
++    if (!opts.runstatedir) {
++        return True;
++    }
++
++    ftsargv[0] = opts.runstatedir;
++    ftsargv[1] = NULL;
++
++    /*
++     * Make sure catalog dir exists.
++     */
++    if((mkdir(opts.runstatedir,0755) != 0) && (errno != EEXIST)){
++        OWPError(ctx,OWPErrFATAL,OWPErrUNKNOWN,
++                "Unable to mkdir(%s): %M",opts.runstatedir);
++        return False;
++    }
++
++    if(!(fts = fts_open(ftsargv, FTS_PHYSICAL,NULL))){
++        OWPError(ctx,OWPErrFATAL,errno,"fts_open(%s): %M",opts.runstatedir);
++        return False;
++    }
++
++    while((p = fts_read(fts)) != NULL){
++        switch(p->fts_info){
++            case FTS_D:        /* ignore */
++            case FTS_DC:
++            case FTS_DNR:
++            case FTS_DP:
++                break;
++            case FTS_ERR:
++                if(p->fts_errno != ENOENT){
++                    OWPError(ctx,OWPErrFATAL,p->fts_errno,"%s: %M",
++                            p->fts_path);
++                    goto err;
++                }
++                break;
++            default:
++                if(memcmp(p->fts_accpath, "control-", strlen("control-"))){
++                    continue;
++                }
++                if(unlink(p->fts_accpath) && (errno != ENOENT)){
++                    OWPError(ctx,OWPErrFATAL,errno,"unlink(%s): %M",
++                            p->fts_path);
++                }
++                break;
++        }
++    }
++
++    ret = True;
++err:
++    fts_close(fts);
++
++    return ret;
++}
++
+ struct ChldStateRec{
+     OWPDPolicy      policy;
+     pid_t           pid;
+@@ -300,8 +519,11 @@ FreeChldState(
+     /*
+      * TODO: Release bandwidth resources here if there are any left.
+      */
++
+     control_sessions--;
+ 
++    RemoveSessionState(cstate->policy->ctx, cstate->pid);
++
+     /*
+      * TODO: If exit was not normal... Should we be looking at
+      * disk usage for this class and adjusting for the fact that
+@@ -704,6 +926,8 @@ ACCEPT:
+         exit(out);        
+     }
+ 
++    WriteSessionState(policy->ctx,cntrl);
++
+     /*
+      * Process all requests - return when complete.
+      */
+@@ -728,10 +952,12 @@ ACCEPT:
+ #ifdef TWAMP
+             case OWPReqTestTW:
+                 rc = OWPProcessTestRequestTW(cntrl,&owpd_intr);
++                WriteSessionState(policy->ctx,cntrl);
+                 break;
+ #else
+             case OWPReqTest:
+                 rc = OWPProcessTestRequest(cntrl,&owpd_intr);
++                WriteSessionState(policy->ctx,cntrl);
+                 break;
+ #endif
+ 
+@@ -755,6 +981,8 @@ ACCEPT:
+                 while(True){
+                     int        wstate;
+ 
++                    WriteSessionState(policy->ctx,cntrl);
++
+                     rc = OWPErrOK;
+                     owpd_intr = 0;
+                     wstate = OWPStopSessionsWait(cntrl,NULL,
+@@ -763,6 +991,7 @@ ACCEPT:
+                         goto done;
+                     }
+                     else if(owpd_exit){
++                        WriteSessionState(policy->ctx,cntrl);
+                         /*
+                          * wstate == 2 indicates gracefull shutdown...
+                          * Continue on and let StopSessions happen.
+@@ -773,6 +1002,7 @@ ACCEPT:
+                         break;
+                     }
+                     if(wstate <= 0){
++                        WriteSessionState(policy->ctx,cntrl);
+                         goto nextreq;
+                     }
+                 }
+@@ -790,6 +1020,7 @@ ACCEPT:
+                     goto done;
+                 }
+                 rc = OWPStopSessions(cntrl,&owpd_intr,NULL);
++                WriteSessionState(policy->ctx,cntrl);
+ #endif
+ 
+                 break;
+@@ -1193,6 +1424,14 @@ LoadConfig(
+             }
+             opts.maxcontrolsessions = tlng;
+         }
++        else if(!strncasecmp(key,"runstatedir",7)){
++            if(!(opts.runstatedir = strdup(val))) {
++                fprintf(stderr,"strdup(): %s\n",
++                        strerror(errno));
++                rc=-rc;
++                break;
++            }
++        }
+ #ifdef TWAMP
+         else if(!strncasecmp(key,"testtimeout",
+                              strlen("testtimeout"))){
+@@ -1258,9 +1497,9 @@ int main(
+     sigset_t            sigs;
+ 
+ #ifndef NDEBUG
+-    char                *optstring = "a:c:d:e:fG:hP:R:S:U:vwZ";
++    char                *optstring = "a:c:d:e:fG:hP:r:R:S:U:vwZ";
+ #else        
+-    char                *optstring = "a:c:d:e:fG:hP:R:S:U:vZ";
++    char                *optstring = "a:c:d:e:fG:hP:r:R:S:U:vZ";
+ #endif
+ 
+     /*
+@@ -1424,6 +1663,12 @@ int main(
+                     exit(1);
+                 }
+                 break;
++            case 'r':        /* -r "var/run/owampd directory" */
++                if (!(opts.runstatedir = strdup(optarg))) {
++                    I2ErrLog(errhand,"strdup(): %M");
++                    exit(1);
++                }
++                break;
+             case 'R':        /* -R "var/run directory" */
+                 if (!(opts.vardir = strdup(optarg))) {
+                     I2ErrLog(errhand,"strdup(): %M");
+@@ -1538,6 +1783,10 @@ int main(
+         exit(1);
+     };
+ 
++    if (!CleanSessionState(policy->ctx)){
++        exit(1);
++    }
++
+     /*
+      * Done with the line buffer. (reset to 0 for consistancy.)
+      */
+@@ -1623,6 +1872,13 @@ int main(
+             }
+         }
+ 
++        if (opts.runstatedir &&
++            (lchown(opts.runstatedir,setuser,setgroup) < 0)) {
++            I2ErrLog(errhand,"Unable to chown \"%s\" to \"%s\":\"%s\": %M",
++                     opts.runstatedir, opts.user, opts.group);
++            exit(1);
++        }
++
+         /*
+          * Only setting effective id for now. This will catch
+          * errors, and will still allow the rename of the
+diff --git a/owampd/owampdP.h b/owampd/owampdP.h
+index 26d8dc1..40bd02e 100644
+--- a/owampd/owampdP.h
++++ b/owampd/owampdP.h
+@@ -70,6 +70,7 @@ typedef struct {
+ 
+     I2Boolean       setEndDelay;
+     double          endDelay;
++    char            *runstatedir;
+ } owampd_opts;
+ 
+ #endif        /*        _OWAMPDP_H_        */

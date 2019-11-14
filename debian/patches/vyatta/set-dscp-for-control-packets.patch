@@ -1,0 +1,337 @@
+From: David Stapleton <david.stapleton@att.com>
+Date: Mon, 12 Jun 2017 12:17:03 +0100
+Subject: Server option to set DSCP value in control packets
+
+---
+ conf/owampd.conf         |  5 ++++
+ conf/twampd.conf         |  5 ++++
+ doc/nwampd_conf_desc.man |  7 ++++++
+ owamp/api.c              | 62 ++++++++++++++++++++++++++++++++++++++++++++++++
+ owamp/capi.c             |  2 +-
+ owamp/endpoint.c         |  4 ++--
+ owamp/owamp.h            |  8 +++++++
+ owamp/owampP.h           |  8 -------
+ owamp/protocol.c         | 61 -----------------------------------------------
+ owampd/owampd.c          | 37 +++++++++++++++++++++++++++++
+ owampd/owampdP.h         |  1 +
+ 11 files changed, 128 insertions(+), 72 deletions(-)
+
+diff --git a/conf/owampd.conf b/conf/owampd.conf
+index 7e52002..f3d3e1a 100644
+--- a/conf/owampd.conf
++++ b/conf/owampd.conf
+@@ -121,3 +121,8 @@ diskfudge	3.0
+ # limit is no longer exceeded.
+ # (defaults to 0 - unlimited)
+ #maxcontrolsessions	0
++
++# controldscpvalue - dscp value to be set in all control packets sent
++# to clients.
++# (defaults to 0)
++#controldscpvalue	0
+diff --git a/conf/twampd.conf b/conf/twampd.conf
+index 2b5eb04..ad3237b 100644
+--- a/conf/twampd.conf
++++ b/conf/twampd.conf
+@@ -92,3 +92,8 @@ testports 18760-19960
+ # enddelay - amount of seconds to wait after send sessions are complete before
+ # actually sending the stop sessions message. (double)
+ #enddelay 1.0
++
++# controldscpvalue - dscp value to be set in all control packets sent
++# to clients.
++# (defaults to 0)
++#controldscpvalue	0
+diff --git a/doc/nwampd_conf_desc.man b/doc/nwampd_conf_desc.man
+index 0367d98..cae944b 100644
+--- a/doc/nwampd_conf_desc.man
++++ b/doc/nwampd_conf_desc.man
+@@ -81,6 +81,13 @@ Number of seconds to wait for protocol messages before timing out.
+ .\}
+ .RE
+ .TP
++.BI controldscpvalue " controldscpvalue"
++DSCP value to set in all control packets sent to clients.
++.RS
++.IP Default:
++0 (DF/CS0)
++.RE
++.TP
+ .BI datadir " datadir"
+ Directory path where data files will be placed. The data files are the
+ "\fIreceive\fR" session files that are buffered on the server. Policy
+diff --git a/owamp/api.c b/owamp/api.c
+index ad9381a..253d3bf 100644
+--- a/owamp/api.c
++++ b/owamp/api.c
+@@ -3977,3 +3977,65 @@ OWPControlGetRemoteAddr(
+ {
+     return I2AddrCopy(cntrl->remote_addr);
+ }
++
++/*
++ * Function:        OWPSocketSetDSCP
++ *
++ * Description:
++ *         Set the DSCP value to be used for subsequent packets send
++ *         using the specified socket.
++ *
++ * In Args:
++ *
++ * Out Args:
++ *
++ * Scope:
++ * Returns:
++ * Side Effect:
++ */
++OWPBoolean
++OWPSocketSetDSCP(
++        OWPContext ctx,
++        int fd,
++        int af,
++        uint8_t dscp
++    )
++{
++    int             optlevel;
++    int             optname;
++    int             sopt;
++
++    /* Copy DSCP bits and shift for setting TOS  */
++    sopt = (uint8_t)(dscp & 0x3F) << 2;
++
++    switch(af){
++    case AF_INET:
++        optlevel = SOL_IP;
++        optname = IP_TOS;
++        break;
++#ifdef        AF_INET6
++    case AF_INET6:
++        optlevel = IPPROTO_IPV6;
++        /*
++         * Look for RFC 3542 sockopts
++         */
++#ifdef  IPV6_TCLASS
++        optname = IPV6_TCLASS;
++#else
++        optname = IP_TOS;
++#endif
++        break;
++#endif
++    default:
++        OWPError(ctx,OWPErrFATAL,OWPErrUNKNOWN,
++                 "OWPSocketSetDSCP bad AF: %d",af);
++        return False;
++    }
++
++    if (setsockopt(fd,optlevel,optname,&sopt,sizeof(sopt)) < 0) {
++        OWPError(ctx,OWPErrFATAL,errno,"setsockopt(IP_TOS) failed: %M");
++        return False;
++    }
++
++    return True;
++}
+diff --git a/owamp/capi.c b/owamp/capi.c
+index a89befd..6bfa85c 100644
+--- a/owamp/capi.c
++++ b/owamp/capi.c
+@@ -205,7 +205,7 @@ TryAddr(
+      * connection to drop.
+      */
+     if (OWPContextConfigGetU32(cntrl->ctx,OWPControlDSCP,&dscp)) {
+-        if (!_OWPSocketSetDSCP(cntrl,fd,ai->ai_family,(uint8_t)dscp)) {
++        if (!OWPSocketSetDSCP(cntrl->ctx,fd,ai->ai_family,(uint8_t)dscp)) {
+             goto cleanup;
+         }
+     }
+diff --git a/owamp/endpoint.c b/owamp/endpoint.c
+index f93f782..ecc9c42 100644
+--- a/owamp/endpoint.c
++++ b/owamp/endpoint.c
+@@ -1004,8 +1004,8 @@ success:
+                 *err_ret = OWPErrOK;
+                 goto error;
+             }
+-            if (!_OWPSocketSetDSCP(cntrl,ep->sockfd,saddr->sa_family,
+-                                   (uint8_t)(ep->tsession->test_spec.typeP >> 24))) {
++            if (!OWPSocketSetDSCP(cntrl->ctx,ep->sockfd,saddr->sa_family,
++                                  (uint8_t)(ep->tsession->test_spec.typeP >> 24))) {
+                 goto error;
+             }
+         }
+diff --git a/owamp/owamp.h b/owamp/owamp.h
+index 9922045..dc69615 100644
+--- a/owamp/owamp.h
++++ b/owamp/owamp.h
+@@ -1933,4 +1933,12 @@ extern I2Addr
+ OWPControlGetRemoteAddr(
+     OWPControl cntrl);
+ 
++extern OWPBoolean
++OWPSocketSetDSCP(
++        OWPContext ctx,
++        int fd,
++        int af,
++        uint8_t dscp
++    );
++
+ #endif        /* OWAMP_H */
+diff --git a/owamp/owampP.h b/owamp/owampP.h
+index cdac912..e6fc707 100644
+--- a/owamp/owampP.h
++++ b/owamp/owampP.h
+@@ -1033,12 +1033,4 @@ OWPSocketInterfaceBind(
+     const char      *interface
+ );
+ 
+-extern OWPBoolean
+-_OWPSocketSetDSCP(
+-        OWPControl cntrl,
+-        int fd,
+-        int af,
+-        uint8_t dscp
+-    );
+-
+ #endif        /* OWAMPP_H */
+diff --git a/owamp/protocol.c b/owamp/protocol.c
+index c281a3e..48cc5fe 100644
+--- a/owamp/protocol.c
++++ b/owamp/protocol.c
+@@ -3161,64 +3161,3 @@ _OWPDecodeTWDataRecord(
+ 
+     return True;
+ }
+-
+-/*
+- * Function:        _OWPSocketSetDSCP
+- *
+- * Description:
+- *         Set the DSCP value to be used for subsequent packets send using the specified socket.
+- *
+- * In Args:
+- *
+- * Out Args:
+- *
+- * Scope:
+- * Returns:
+- * Side Effect:
+- */
+-OWPBoolean
+-_OWPSocketSetDSCP(
+-        OWPControl cntrl,
+-        int fd,
+-        int af,
+-        uint8_t dscp
+-    )
+-{
+-    int             optlevel;
+-    int             optname;
+-    int             sopt;
+-
+-    /* Copy DSCP bits and shift for setting TOS  */
+-    sopt = (uint8_t)(dscp & 0x3F) << 2;
+-
+-    switch(af){
+-    case AF_INET:
+-        optlevel = SOL_IP;
+-        optname = IP_TOS;
+-        break;
+-#ifdef        AF_INET6
+-    case AF_INET6:
+-        optlevel = IPPROTO_IPV6;
+-        /*
+-         * Look for RFC 3542 sockopts
+-         */
+-#ifdef  IPV6_TCLASS
+-        optname = IPV6_TCLASS;
+-#else
+-        optname = IP_TOS;
+-#endif
+-        break;
+-#endif
+-    default:
+-        OWPError(cntrl->ctx,OWPErrFATAL,OWPErrUNKNOWN,
+-                 "_OWPSocketSetDSCP bad AF: %d",af);
+-        return False;
+-    }
+-
+-    if (setsockopt(fd,optlevel,optname,&sopt,sizeof(sopt)) < 0) {
+-        OWPError(cntrl->ctx,OWPErrFATAL,errno,"setsockopt(IP_TOS) failed: %M");
+-        return False;
+-    }
+-
+-    return True;
+-}
+diff --git a/owampd/owampd.c b/owampd/owampd.c
+index 7d5d6de..a93cdb6 100644
+--- a/owampd/owampd.c
++++ b/owampd/owampd.c
+@@ -1424,6 +1424,21 @@ LoadConfig(
+             }
+             opts.maxcontrolsessions = tlng;
+         }
++        else if(!strncasecmp(key,"controldscpvalue",
++                             2)){
++            char            *end=NULL;
++            uint8_t        tlng;
++
++            errno = 0;
++            tlng = strtoul(val,&end,10);
++            if((end == val) || (errno == ERANGE)){
++                fprintf(stderr,"strtoul(): %s\n",
++                        strerror(errno));
++                rc=-rc;
++                break;
++            }
++            opts.controldscpvalue = tlng;
++        }
+         else if(!strncasecmp(key,"runstatedir",7)){
+             if(!(opts.runstatedir = strdup(val))) {
+                 fprintf(stderr,"strdup(): %s\n",
+@@ -1531,6 +1546,7 @@ int main(
+     opts.controltimeout = OWP_DFLT_CONTROL_TIMEOUT;
+     opts.portspec = NULL;
+     opts.maxcontrolsessions = 0;
++    opts.controldscpvalue = 0;
+ 
+     if(!getcwd(opts.cwd,sizeof(opts.cwd))){
+         perror("getcwd()");
+@@ -2146,6 +2162,27 @@ int main(
+     fds[0].events = POLLIN;
+     fds[0].revents = 0;
+ 
++    /*
++     * Set dscp value for control packets
++     */
++    if (opts.controldscpvalue) {
++        int family = I2AddrSAddr(listenaddr,NULL)->sa_family;
++        /*
++         * This function will log any issues, but errors in setting this
++         * aren't fatal.
++         */
++        OWPSocketSetDSCP(ctx,listenfd,family,
++                         opts.controldscpvalue);
++        if (family == AF_INET6) {
++            /*
++             * This is a dual IPv6/IPv4 socket, so also set the option
++             * for IPv4.
++             */
++            OWPSocketSetDSCP(ctx,listenfd,AF_INET,
++                             opts.controldscpvalue);
++        }
++    }
++
+     while (1) {
+         int     nfound;
+ 
+diff --git a/owampd/owampdP.h b/owampd/owampdP.h
+index 40bd02e..257873e 100644
+--- a/owampd/owampdP.h
++++ b/owampd/owampdP.h
+@@ -58,6 +58,7 @@ typedef struct {
+     double          diskfudge;
+     uint32_t        dieby;
+     uint32_t        controltimeout;
++    uint8_t         controldscpvalue;
+ #ifdef TWAMP
+     uint32_t        testtimeout;
+ #endif

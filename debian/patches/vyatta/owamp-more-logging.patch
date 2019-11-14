@@ -1,0 +1,73 @@
+From: Robert Shearman <robert.shearman@att.com>
+Date: Mon, 12 Jun 2017 12:17:01 +0100
+Subject: Make debugging easier by logging StartSessions & StopSessions events
+
+Additionally, add more debugging in case of an invalid state error is encountered.
+---
+ owamp/api.c      | 8 ++++++++
+ owamp/protocol.c | 2 +-
+ owamp/sapi.c     | 5 +++++
+ 3 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/owamp/api.c b/owamp/api.c
+index f179de0..98888a5 100644
+--- a/owamp/api.c
++++ b/owamp/api.c
+@@ -1873,6 +1873,14 @@ done:
+ 
+     cntrl->state &= ~_OWPStateTest;
+ 
++    /*
++     * Do this only on the server to avoid noise in the client
++     */
++    if (cntrl->server) {
++        OWPError(cntrl->ctx,OWPErrINFO,OWPErrINVALID,
++                 "StopSessions %u sessions", num_sessions);
++    }
++
+     return err2;
+ }
+ 
+diff --git a/owamp/protocol.c b/owamp/protocol.c
+index 884d6fb..48cc5fe 100644
+--- a/owamp/protocol.c
++++ b/owamp/protocol.c
+@@ -469,7 +469,7 @@ OWPReadRequestType(
+ 
+     if(!_OWPStateIsRequest(cntrl) || _OWPStateIsReading(cntrl)){
+         OWPError(cntrl->ctx,OWPErrFATAL,OWPErrINVALID,
+-                "OWPReadRequestType:called in wrong state.");
++                 "OWPReadRequestType:called in wrong state 0x%x.", cntrl->state);
+         return OWPReqInvalid;
+     }
+ 
+diff --git a/owamp/sapi.c b/owamp/sapi.c
+index 0e5dae1..21a2b8c 100644
+--- a/owamp/sapi.c
++++ b/owamp/sapi.c
+@@ -925,6 +925,7 @@ OWPProcessStartSessions(
+     OWPErrSeverity  err,err2=OWPErrOK;
+     int             ival=1;
+     int             *intr = &ival;
++    unsigned int    num_sessions=0;
+ 
+     if(retn_on_intr){
+         intr = retn_on_intr;
+@@ -941,6 +942,7 @@ OWPProcessStartSessions(
+                 return _OWPFailControlSession(cntrl,err);
+             }
+             err2 = MIN(err,err2);
++            num_sessions++;
+         }
+     }
+ 
+@@ -948,6 +950,9 @@ OWPProcessStartSessions(
+         return _OWPFailControlSession(cntrl,rc);
+ 
+ 
++    OWPError(cntrl->ctx,OWPErrINFO,OWPErrINVALID,
++             "StartSessions %u sessions", num_sessions);
++
+     return err2;
+ }
+ 

@@ -1,0 +1,55 @@
+From: Robert Shearman <robert.shearman@att.com>
+Date: Mon, 12 Jun 2017 12:17:03 +0100
+Subject: Make [ot]wampd allow a zero address mask
+
+This is useful because it allows the user to deny certain addresses
+from one address family, whilst allowing all addresses from another
+family.
+
+Change the config parsing to only error on prefix lengths < 0, and
+change the address matching to work with zero address masks.
+---
+ owampd/policy.c | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/owampd/policy.c b/owampd/policy.c
+index 7f7728a..38c73a0 100644
+--- a/owampd/policy.c
++++ b/owampd/policy.c
+@@ -517,7 +517,7 @@ parseassignline(
+             unsigned long tlng;
+ 
+             tlng = (int)strtoul(mask,&end,10);
+-            if((*end != '\0') || (tlng < 1) ||
++            if((*end != '\0') || (tlng < 0) ||
+                     (tlng > (tpid.net.addrsize*8))){
+                 OWPError(policy->ctx,OWPErrFATAL,OWPErrUNKNOWN,
+                         "Invalid address mask \"%s\".",mask);
+@@ -1531,10 +1531,10 @@ GetNodeFromAddr(
+     /*
+      * Start with the max mask size (full address) and keep decreasing
+      * the mask size until all possible address masks have been checked
+-     * for the given address.
++     * for the given address, including 0.0.0.0/0 and ::/0.
+      */
+     for(pid.net.mask_len=pid.net.addrsize*8;
+-            pid.net.mask_len > 0; pid.net.mask_len--){
++            True; pid.net.mask_len--){
+         /*
+          * nbytes is number of complete bytes in "mask".
+          * nbits is number of bits in the following byte that
+@@ -1555,6 +1555,14 @@ GetNodeFromAddr(
+         if(I2HashFetch(policy->idents,key,&val)){
+             return (OWPDPolicyNode)val.dptr;
+         }
++
++        /*
++         * Check performed here to avoid issues with underflow if it
++         * were to be done in for statement.
++         */
++        if(pid.net.mask_len == 0){
++            break;
++        }
+     }
+ 
+     return GetNodeDefault(policy);

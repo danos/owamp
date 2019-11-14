@@ -1,0 +1,22 @@
+From: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+Date: Mon, 12 Jun 2017 12:17:05 +0100
+Subject: [t|o]wampd: Change default logging level to debug
+
+This matches the logging behaviour from the 3.4.10 versions.
+---
+ owampd/owampd.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/owampd/owampd.c b/owampd/owampd.c
+index 0757cd8..b098cef 100644
+--- a/owampd/owampd.c
++++ b/owampd/owampd.c
+@@ -1531,7 +1531,7 @@ int main(
+     syslogattr.facility = LOG_DAEMON;
+     syslogattr.priority = LOG_ERR;
+     syslogattr.line_info = I2MSG;
+-    syslogattr.report_level = OWPErrINFO;
++    syslogattr.report_level = OWPErrDEBUG;
+     
+     /* Set up options defaults */
+     opts.verbose = False;

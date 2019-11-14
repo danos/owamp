@@ -46,4 +46,10 @@ esac
 
 #DEBHELPER#
 
+if [ "$1" = "configure" ]; then
+	if [ -d /run/systemd/system ]; then
+		deb-systemd-invoke restart twamp-server.target || true
+	fi
+fi
+
 exit 0

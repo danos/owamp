@@ -1,0 +1,254 @@
+From: Robert Shearman <robert.shearman@att.com>
+Date: Thu, 29 Jan 2015 20:07:31 +0000
+Subject: Enable debug code to be enabled/disabled using existing configure
+ flag
+
+Replace uses of "#ifndef NDEBUG" with "#ifdef DEBUG", since DEBUG is a
+flag that configure defines in CFLAGS if the user specifies the
+--enable-debug compile option.
+---
+ owamp/endpoint.c       |  2 +-
+ owamp/owamp.h          |  4 ++--
+ owamp/owampP.h         |  2 +-
+ owamp/protocol.c       |  2 +-
+ owampd/owampd.c        |  8 ++++----
+ owampd/owampdP.h       |  2 +-
+ owping/owping.c        | 12 +++++++-----
+ owping/owpingP.h       |  2 +-
+ powstream/powstream.c  |  4 ++--
+ powstream/powstreamP.h |  2 +-
+ test/owtvec.c          |  2 +-
+ 11 files changed, 22 insertions(+), 20 deletions(-)
+
+diff --git a/owamp/endpoint.c b/owamp/endpoint.c
+index ecc9c42..7ff2c4a 100644
+--- a/owamp/endpoint.c
++++ b/owamp/endpoint.c
+@@ -4014,7 +4014,7 @@ parenterr:
+      * busy loop for systems where debugger doesn't support
+      * child follow_fork mode functionality...
+      */
+-#ifndef        NDEBUG
++#ifdef DEBUG
+     {
+         void *waitfor = OWPContextConfigGetV(ctx,OWPChildWait);
+ 
+diff --git a/owamp/owamp.h b/owamp/owamp.h
+index dc69615..a95f1c0 100644
+--- a/owamp/owamp.h
++++ b/owamp/owamp.h
+@@ -674,7 +674,7 @@ typedef void (*OWPCloseFileFunc)(
+         OWPAcceptType   aval
+         );
+ 
+-#ifndef NDEBUG
++#ifdef DEBUG
+ /*
+  * This integer type is used to aid in child-debugging. If OWPChildWait is
+  * set and non-zero forked off endpoints will go into a busy-wait loop to
+@@ -682,7 +682,7 @@ typedef void (*OWPCloseFileFunc)(
+  * attached and the loop variable modified with the debugger. This should
+  * not strictly be needed, but the gdb on many of the test plateforms I
+  * used did not implement the follow-fork-mode option.) This was a quick
+- * fix. (This will not be used if owamp is compiled with -DNDEBUG.)
++ * fix. (This will only be used if owamp is compiled with -DDEBUG.)
+  */
+ #define OWPChildWait        "OWPChildWait"
+ #endif
+diff --git a/owamp/owampP.h b/owamp/owampP.h
+index e6fc707..79dea60 100644
+--- a/owamp/owampP.h
++++ b/owamp/owampP.h
+@@ -298,7 +298,7 @@ typedef struct OWPEndpointRec{
+     OWPControl          cntrl;
+     OWPTestSession      tsession;
+ 
+-#ifndef        NDEBUG
++#ifdef DEBUG
+     I2Boolean           childwait;
+ #endif
+ 
+diff --git a/owamp/protocol.c b/owamp/protocol.c
+index 48cc5fe..55325ae 100644
+--- a/owamp/protocol.c
++++ b/owamp/protocol.c
+@@ -2683,7 +2683,7 @@ _OWPWriteFetchSession(
+     }
+ 
+     buf[0] = OWPReqFetchSession;
+-#ifndef        NDEBUG
++#ifdef DEBUG
+     memset(&buf[1],0,7);        /* Unused        */
+ #endif
+     *(uint32_t*)&buf[8] = htonl(begin);
+diff --git a/owampd/owampd.c b/owampd/owampd.c
+index a93cdb6..0757cd8 100644
+--- a/owampd/owampd.c
++++ b/owampd/owampd.c
+@@ -114,7 +114,7 @@ usage(
+             "   -S nodename:port  Srcaddr to bind to\n"
+             "   -U user           Run as user \"user\" :-uid also valid\n"
+             "   -v                verbose output\n"
+-#ifndef        NDEBUG
++#ifdef DEBUG
+             "   -w                Debugging: busy-wait children after fork to allow attachment\n"
+             "   -Z                Debugging: Run in foreground\n"
+ #endif
+@@ -841,7 +841,7 @@ ACCEPT:
+ 
+     /* Rest of function is child */
+ 
+-#ifndef        NDEBUG
++#ifdef DEBUG
+     {
+         void *childwait;
+ 
+@@ -1511,7 +1511,7 @@ int main(
+     struct sigaction    ignact,setact;
+     sigset_t            sigs;
+ 
+-#ifndef NDEBUG
++#ifdef DEBUG
+     char                *optstring = "a:c:d:e:fG:hP:r:R:S:U:vwZ";
+ #else        
+     char                *optstring = "a:c:d:e:fG:hP:r:R:S:U:vZ";
+@@ -1695,7 +1695,7 @@ int main(
+             case 'e':
+             case 'Z':
+                 break;
+-#ifndef NDEBUG
++#ifdef DEBUG
+             case 'w':
+                 opts.childwait = (void*)True;
+                 break;
+diff --git a/owampd/owampdP.h b/owampd/owampdP.h
+index 257873e..5b26ec8 100644
+--- a/owampd/owampdP.h
++++ b/owampd/owampdP.h
+@@ -64,7 +64,7 @@ typedef struct {
+ #endif
+     uint32_t        pbkdf2_count;
+     uint32_t        maxcontrolsessions;
+-#ifndef        NDEBUG
++#ifdef DEBUG
+     void            *childwait;
+ #endif
+     I2Boolean       daemon;
+diff --git a/owping/owping.c b/owping/owping.c
+index b1a579c..33bdc70 100644
+--- a/owping/owping.c
++++ b/owping/owping.c
+@@ -1249,13 +1249,13 @@ main(
+ #else
+     static char         *ow_opts = "ftT:";
+ #endif
+-#ifndef    NDEBUG
++#ifdef DEBUG
+     static char         *debug_opts = "w";
+ #endif
+     int                 fname_len;
+ 
+     ia.line_info = (I2NAME | I2MSG);
+-#ifndef    NDEBUG
++#ifdef DEBUG
+     ia.line_info |= (I2LINE | I2FILE);
+ #endif
+     ia.fp = stderr;
+@@ -1309,7 +1309,9 @@ main(
+     ping_ctx.opt.v4only = ping_ctx.opt.v6only = ping_ctx.opt.zero_addr =
+     ping_ctx.opt.records = ping_ctx.opt.from = ping_ctx.opt.to =
+     ping_ctx.opt.quiet = ping_ctx.opt.raw = ping_ctx.opt.machine = False;
++#ifdef DEBUG
+     ping_ctx.opt.childwait = NULL;
++#endif
+     ping_ctx.opt.save_from_test = ping_ctx.opt.save_to_test
+         = ping_ctx.opt.identity = ping_ctx.opt.pffile
+         = ping_ctx.opt.srcaddr = ping_ctx.opt.authmode
+@@ -1349,7 +1351,7 @@ main(
+     }
+ 
+     strcat(optstring, gen_opts);
+-#ifndef    NDEBUG
++#ifdef DEBUG
+     strcat(optstring,debug_opts);
+ #endif
+ #ifdef TWAMP
+@@ -1619,7 +1621,7 @@ main(
+ 	case 'U':
+ 	  ping_ctx.opt.display_unix_ts = True;
+ 	  break;
+-#ifndef    NDEBUG
++#ifdef DEBUG
+             case 'w':
+                 ping_ctx.opt.childwait = (void*)True;
+                 break;
+@@ -1814,7 +1816,7 @@ main(
+             exit(1);
+         }
+ 
+-#ifndef    NDEBUG
++#ifdef DEBUG
+         /*
+          * Setup debugging of child processes.
+          */
+diff --git a/owping/owpingP.h b/owping/owpingP.h
+index 87b6fed..565af8e 100644
+--- a/owping/owpingP.h
++++ b/owping/owpingP.h
+@@ -86,7 +86,7 @@ typedef    struct {
+ 
+         OWPPortRange    portspec;           /* -P */
+ 
+-#ifndef    NDEBUG
++#ifdef DEBUG
+         void            *childwait;         /* -w */
+ #endif
+ 
+diff --git a/powstream/powstream.c b/powstream/powstream.c
+index 2506a1f..ff49ffd 100644
+--- a/powstream/powstream.c
++++ b/powstream/powstream.c
+@@ -1517,7 +1517,7 @@ main(
+                 appctx.opt.display_unix_ts = True;
+                 break;
+             /* undocumented debug options */
+-#ifndef        NDEBUG
++#ifdef DEBUG
+             case 'w':
+                 appctx.opt.childwait = True;
+                 break;
+@@ -1787,7 +1787,7 @@ main(
+         exit(1);
+     }
+ 
+-#ifndef NDEBUG
++#ifdef DEBUG
+     /*
+      * Setup debugging of child prcesses.
+      */
+diff --git a/powstream/powstreamP.h b/powstream/powstreamP.h
+index 02b0a11..2293d98 100644
+--- a/powstream/powstreamP.h
++++ b/powstream/powstreamP.h
+@@ -70,7 +70,7 @@ typedef        struct {
+         char        *authmode;          /* -A */
+         char        *identity;          /* -u */
+         char        *pffile;            /* -k */
+-#ifndef        NDEBUG
++#ifdef DEBUG
+         I2Boolean   childwait;          /* -w */
+ #endif
+ 
+diff --git a/test/owtvec.c b/test/owtvec.c
+index b7cbfae..2f9258f 100644
+--- a/test/owtvec.c
++++ b/test/owtvec.c
+@@ -56,7 +56,7 @@ main(
+ 
+ 
+     ia.line_info = (I2NAME | I2MSG);
+-#ifndef        NDEBUG
++#ifdef DEBUG
+     ia.line_info |= (I2LINE | I2FILE);
+ #endif
+     ia.fp = stderr;

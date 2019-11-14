@@ -1,0 +1,349 @@
+From: Robert Shearman <robert.shearman@att.com>
+Date: Mon, 12 Jun 2017 12:17:02 +0100
+Subject: Add {t,o}wping option for specifying the DSCP value on control
+ sessions
+
+This is useful for testing purposes, and for operational purposes in a DSCP-aware network.
+---
+ owamp/capi.c     | 12 +++++++++++
+ owamp/endpoint.c | 47 ++-----------------------------------------
+ owamp/owamp.h    |  5 +++++
+ owamp/owampP.h   |  8 ++++++++
+ owamp/protocol.c | 61 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ owping/owping.c  | 53 ++++++++++++++++++++++++++++++++++--------------
+ owping/owpingP.h |  1 +
+ 7 files changed, 127 insertions(+), 60 deletions(-)
+
+diff --git a/owamp/capi.c b/owamp/capi.c
+index 749d597..a89befd 100644
+--- a/owamp/capi.c
++++ b/owamp/capi.c
+@@ -176,6 +176,7 @@ TryAddr(
+ {
+     OWPErrSeverity  addr_ok=OWPErrOK;
+     int             fd;
++    uint32_t        dscp;
+ 
+     fd = socket(ai->ai_family,ai->ai_socktype,ai->ai_protocol);
+     if(fd < 0)
+@@ -198,6 +199,17 @@ TryAddr(
+         }
+     }
+ 
++    /*
++     * Must set TOS/DSCP parameter before connecting, otherwise it may
++     * not be mirrored in reply packets and may cause the TCP
++     * connection to drop.
++     */
++    if (OWPContextConfigGetU32(cntrl->ctx,OWPControlDSCP,&dscp)) {
++        if (!_OWPSocketSetDSCP(cntrl,fd,ai->ai_family,(uint8_t)dscp)) {
++            goto cleanup;
++        }
++    }
++
+     /*
+      * Call connect - if it succeeds, return else try again.
+      */
+diff --git a/owamp/endpoint.c b/owamp/endpoint.c
+index 8d6d426..f93f782 100644
+--- a/owamp/endpoint.c
++++ b/owamp/endpoint.c
+@@ -976,9 +976,6 @@ success:
+         }
+ 
+         if(ep->tsession->test_spec.typeP){
+-            int optname = IP_TOS;
+-            int optlevel = IP_TOS;
+-
+             /*
+              * TODO: Decoding of typeP will need to change if
+              * the code can ever support PHB directly(RFC 2836). (Need
+@@ -1007,48 +1004,8 @@ success:
+                 *err_ret = OWPErrOK;
+                 goto error;
+             }
+-            /*
+-             * TODO: When I find a kernel that actually has IPV6_TCLASS
+-             * make sure it works. (This looks like the RFC 3542 way...)
+-             */
+-            switch(saddr->sa_family){
+-                case AF_INET:
+-                    optlevel = IPPROTO_IP;
+-                    optname = IP_TOS;
+-                    break;
+-#ifdef        AF_INET6
+-                case AF_INET6:
+-                    optlevel = IPPROTO_IPV6;
+-/*
+- * Look for RFC 3542 sockopts - have no systems with them, but look
+- * for them anyway...
+- */
+-#ifdef  IPV6_TCLASS
+-                    optname = IPV6_TCLASS;
+-#else
+-                    optname = IP_TOS;
+-#endif
+-                    break;
+-#endif
+-                default:
+-                    /*NOTREACHED*/
+-                    break;
+-            }
+-
+-            /* Copy high-order byte (minus first two bits) */
+-            sopt = (uint8_t)(ep->tsession->test_spec.typeP >> 24);
+-            sopt &= 0x3F; /* this should be a no-op until PHB... */
+-
+-            /* shift for setting TOS */
+-            sopt <<= 2;
+-            if(setsockopt(ep->sockfd,optlevel,optname,
+-                        (void*)&sopt,sizeof(sopt)) < 0){
+-                OWPError(cntrl->ctx,OWPErrFATAL,OWPErrUNKNOWN,
+-                        "setsockopt(%s,%s=%d): %M",
+-                        ((optlevel==IPPROTO_IP)?
+-                         "IPPROTO_IP":"IPPROTO_IPV6"),
+-                        ((optname==IP_TOS)?"IP_TOS":"IPV6_TCLASS"),
+-                        sopt);
++            if (!_OWPSocketSetDSCP(cntrl,ep->sockfd,saddr->sa_family,
++                                   (uint8_t)(ep->tsession->test_spec.typeP >> 24))) {
+                 goto error;
+             }
+         }
+diff --git a/owamp/owamp.h b/owamp/owamp.h
+index 41e9b00..9922045 100644
+--- a/owamp/owamp.h
++++ b/owamp/owamp.h
+@@ -1199,6 +1199,11 @@ OWPProcessFetchSession(
+         int         *retn_on_intr
+         );
+ 
++/*
++ * DSCP bits set in client control packets.
++ */
++#define OWPControlDSCP "OWPControlDSCP"
++
+ extern OWPContext
+ OWPGetContext(
+         OWPControl  cntrl
+diff --git a/owamp/owampP.h b/owamp/owampP.h
+index e6fc707..cdac912 100644
+--- a/owamp/owampP.h
++++ b/owamp/owampP.h
+@@ -1033,4 +1033,12 @@ OWPSocketInterfaceBind(
+     const char      *interface
+ );
+ 
++extern OWPBoolean
++_OWPSocketSetDSCP(
++        OWPControl cntrl,
++        int fd,
++        int af,
++        uint8_t dscp
++    );
++
+ #endif        /* OWAMPP_H */
+diff --git a/owamp/protocol.c b/owamp/protocol.c
+index 48cc5fe..c281a3e 100644
+--- a/owamp/protocol.c
++++ b/owamp/protocol.c
+@@ -3161,3 +3161,64 @@ _OWPDecodeTWDataRecord(
+ 
+     return True;
+ }
++
++/*
++ * Function:        _OWPSocketSetDSCP
++ *
++ * Description:
++ *         Set the DSCP value to be used for subsequent packets send using the specified socket.
++ *
++ * In Args:
++ *
++ * Out Args:
++ *
++ * Scope:
++ * Returns:
++ * Side Effect:
++ */
++OWPBoolean
++_OWPSocketSetDSCP(
++        OWPControl cntrl,
++        int fd,
++        int af,
++        uint8_t dscp
++    )
++{
++    int             optlevel;
++    int             optname;
++    int             sopt;
++
++    /* Copy DSCP bits and shift for setting TOS  */
++    sopt = (uint8_t)(dscp & 0x3F) << 2;
++
++    switch(af){
++    case AF_INET:
++        optlevel = SOL_IP;
++        optname = IP_TOS;
++        break;
++#ifdef        AF_INET6
++    case AF_INET6:
++        optlevel = IPPROTO_IPV6;
++        /*
++         * Look for RFC 3542 sockopts
++         */
++#ifdef  IPV6_TCLASS
++        optname = IPV6_TCLASS;
++#else
++        optname = IP_TOS;
++#endif
++        break;
++#endif
++    default:
++        OWPError(cntrl->ctx,OWPErrFATAL,OWPErrUNKNOWN,
++                 "_OWPSocketSetDSCP bad AF: %d",af);
++        return False;
++    }
++
++    if (setsockopt(fd,optlevel,optname,&sopt,sizeof(sopt)) < 0) {
++        OWPError(cntrl->ctx,OWPErrFATAL,errno,"setsockopt(IP_TOS) failed: %M");
++        return False;
++    }
++
++    return True;
++}
+diff --git a/owping/owping.c b/owping/owping.c
+index fa97424..1331791 100644
+--- a/owping/owping.c
++++ b/owping/owping.c
+@@ -70,9 +70,9 @@ print_conn_args(
+         )
+ {
+ #ifdef TWAMP
+-    fprintf(stderr, "%s\n\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n",
++    fprintf(stderr, "%s\n\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n",
+ #else
+-    fprintf(stderr, "%s\n\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n",
++    fprintf(stderr, "%s\n\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n",
+ #endif
+             "              [Connection Args]",
+ #ifdef TWAMP
+@@ -91,7 +91,8 @@ print_conn_args(
+             "   -u username    username to use with Authenticated/Encrypted modes",
+ #endif
+             "   -4             connect using IPv4 addresses only",
+-            "   -6             connect using IPv6 addresses only"
++            "   -6             connect using IPv6 addresses only",
++            "   -X DSCP        RFC 2474 style DSCP value for TOS byte in control packets"
+            );
+ }
+ 
+@@ -103,7 +104,7 @@ print_test_args(
+     fprintf(stderr,
+             "              [Test Args]\n\n"
+             "   -c count       number of test packets\n"
+-            "   -D DSCP        RFC 2474 style DSCP value for TOS byte\n"
++            "   -D DSCP        RFC 2474 style DSCP value for TOS byte in test packets\n"
+ #ifdef TWAMP
+             "   -F file        save results to file\n"
+ #else
+@@ -117,6 +118,7 @@ print_test_args(
+             "   -t | -T file   perform one-way test to testhost [and save results to file]\n"
+ #endif
+             "   -z delayStart  time to wait before executing test (seconds)\n"
++            "   -E endDelay    time to wait after executing test (seconds)\n"
+            );
+ }
+ 
+@@ -957,8 +959,9 @@ FAILED:
+ }
+ 
+ static OWPBoolean
+-parse_typeP(
+-        char        *tspec
++parse_dscp(
++    char        *tspec,
++    uint32_t    *dscp
+         )
+ {
+     char            *tstr,*endptr;
+@@ -1154,16 +1157,11 @@ parse_typeP(
+         goto FAILED;
+     }
+ 
+-    /*
+-     * Set pType - only 6 bits should be set in tosbyte (high-order)
+-     * pType of OWAMP expects them in the low-order 6 bits of the
+-     * high-order byte. So, shift 24 left, and 2 right == 22.
+-     */
+-    ping_ctx.typeP = tosbyte << 22;
++    *dscp = tosbyte >> 2;
+     return True;
+ 
+ FAILED:
+-    I2ErrLogP(eh,EINVAL,"Invalid DSCP value (-D): \"%s\": %M",tspec);
++    I2ErrLogP(eh,EINVAL,"Invalid DSCP value: \"%s\": %M",tspec);
+     return False;
+ }
+ 
+@@ -1217,7 +1215,7 @@ main(
+     int                 ch;
+     char                *endptr = NULL;
+     char                optstring[128];
+-    static char         *conn_opts = "64A:k:S:u:B:";
++    static char         *conn_opts = "64A:k:S:u:B:X:";
+     static char         *test_opts = "c:D:E:F:i:L:P:s:z:";
+     static char         *out_opts = "a:b:d:Mn:N:pQRv::U";
+     static char         *gen_opts = "h";
+@@ -1387,7 +1385,23 @@ main(
+                             "Invalid option \'-D\'. Can only set one \'-D\'");
+                     exit(1);
+                 }
+-                if(!parse_typeP(optarg)){
++                if(!parse_dscp(optarg, &ping_ctx.typeP)){
++                    exit(1);
++                }
++                /*
++                 * Set pType - only 6 bits should be set in dscp (low-order)
++                 * pType of OWAMP expects them in the low-order 6 bits of the
++                 * high-order byte. So, shift 24 left.
++                 */
++                ping_ctx.typeP <<= 24;
++                break;
++            case 'X':
++                if(ping_ctx.opt.controlDscp){
++                    usage(progname,
++                            "Invalid option \'-X\'. Can only set one \'-X\'");
++                    exit(1);
++                }
++                if(!parse_dscp(optarg, &ping_ctx.opt.controlDscp)){
+                     exit(1);
+                 }
+                 break;
+@@ -1721,6 +1735,15 @@ main(
+             exit(1);
+         }
+ 
++        /*
++         * Set OWPControlDSCP
++         */
++        if(ping_ctx.opt.controlDscp &&
++                !OWPContextConfigSetU32(ctx,OWPControlDSCP,
++                    ping_ctx.opt.controlDscp)){
++            I2ErrLog(eh,"Unable to set Context var: %M");
++            exit(1);
++        }
+ 
+         /*
+          * Set the detach processes flag.
+diff --git a/owping/owpingP.h b/owping/owpingP.h
+index 946c762..1d4de3b 100644
+--- a/owping/owpingP.h
++++ b/owping/owpingP.h
+@@ -92,6 +92,7 @@ typedef    struct {
+ 
+         uint32_t        padding;            /* -s */
+ 
++        uint32_t        controlDscp;        /* -X */
+     } opt;
+ 
+     char                *remote_test;

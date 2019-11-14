@@ -1,11 +1,9 @@
 Source: owamp
 Section: net
 Priority: optional
-Maintainer: perfSONAR developers <debian@perfsonar.net>
-Uploaders: Antoine Delvaux <antoine.delvaux@man.poznan.pl>,
- Valentin Vidic <Valentin.Vidic@CARNet.hr>
-Build-Depends: debhelper (>= 9), dh-apparmor, dh-autoreconf, dh-exec, dh-systemd, libi2util-dev (>= 1.4),
- libcap-dev, libssl-dev
+Maintainer: Vyatta Package Maintainers <DL-vyatta-help@att.com>
+Build-Depends: debhelper (>= 9), dh-apparmor, dh-autoreconf, dh-exec, dh-systemd,
+ libi2util-dev (>= 4.2.0), libi2util-dev-vyatta, libcap-dev, libssl-dev
 Standards-Version: 3.9.8
 Homepage: http://software.internet2.edu/owamp/
 Vcs-Git: https://github.com/perfsonar/owamp
@@ -39,6 +37,7 @@ Description: OWAMP daemon
 
 Package: twamp-client
 Architecture: any
+Provides: twamp-client-vyatta
 Depends: ${shlibs:Depends}, ${misc:Depends}, libcap2-bin
 Description: TWAMP command line client utilities
  TWAMP is a client/server package that allows one to measure the
@@ -51,6 +50,7 @@ Description: TWAMP command line client utilities
 
 Package: twamp-server
 Architecture: any
+Provides: twamp-server-vyatta
 Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, lsb-base,
  ntp | time-daemon
 Description: TWAMP daemon

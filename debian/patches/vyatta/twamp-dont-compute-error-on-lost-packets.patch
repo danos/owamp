@@ -1,0 +1,40 @@
+From: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+Date: Thu, 1 Jun 2017 15:09:22 +0100
+Subject: TWAMP: Don't compute error on lost packets
+
+Since the timestamps of lost packets are not used to compute any
+delay statistics there is no need to check the error estimate of
+the timestamp.
+
+In addition we do not check the sync flag on the timestamp since for
+a lost record the sent.recv timestamp is locally obtained, and the
+sync flag on the OWPStats is used to indicate that the clock at the
+remote end is not synced.
+---
+ owamp/stats.c | 13 -------------
+ 1 file changed, 13 deletions(-)
+
+diff --git a/owamp/stats.c b/owamp/stats.c
+index f19e679..6f6ceca 100644
+--- a/owamp/stats.c
++++ b/owamp/stats.c
+@@ -1353,19 +1353,6 @@ IterateSummarizeTWSession(
+         node[TWP_FWD_PKTS]->lost = True;
+         stats->sent++;
+ 
+-        /* sync */
+-        if(!rec->sent.recv.sync){
+-            stats->sync = 0;
+-        }
+-
+-        /*
+-         * Time error
+-         */
+-        derr = OWPGetTimeStampError(&rec->sent.recv);
+-        for(i=0;i<OWP_DELAY_TYPE_NUM;i++){
+-            stats->maxerr[i] = MAX(stats->maxerr[i],derr);
+-        }
+-
+         if(stats->output){
+             fprintf(stats->output,"seq_no=%-10u *LOST*\n", rec->sent.seq_no);
+         }

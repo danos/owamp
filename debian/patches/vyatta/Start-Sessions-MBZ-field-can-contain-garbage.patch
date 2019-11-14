@@ -1,0 +1,30 @@
+From: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+Date: Tue, 1 Oct 2019 12:01:05 +0100
+Subject: Start-Sessions MBZ field can contain garbage
+
+If NDEBUG is defined then the MBZ field of the Start-Sessions message
+contains garbage from a previously received message in the buffer
+since the memset() which explicitly zeroes the field is compiled out.
+
+A single memset() to zero the MBZ and HMAC fields is used to resolve
+this.
+---
+ owamp/protocol.c | 5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+diff --git a/owamp/protocol.c b/owamp/protocol.c
+index eb7d253..884d6fb 100644
+--- a/owamp/protocol.c
++++ b/owamp/protocol.c
+@@ -1724,10 +1724,7 @@ _OWPWriteStartSessions(
+     }
+ 
+     buf[0] = OWPReqStartSessions;
+-#ifndef        NDEBUG
+-    memset(&buf[1],0,15);        /* Unused        */
+-#endif
+-    memset(&buf[16],0,16);        /* Zero padding */
++    memset(&buf[1],0,31);        /* MBZ + zeroed HMAC */
+ 
+     /*
+      * Add text to HMAC and put digest in second block of message

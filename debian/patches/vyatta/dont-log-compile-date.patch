@@ -1,0 +1,27 @@
+From: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+Date: Mon, 12 Jun 2017 12:17:05 +0100
+Subject: Remove compilation date from log messages
+
+Having the compilation date in log messages is not especially useful
+and this change suppresses -Wdate-time compile warnings. The
+possibility of reproducible builds is also hopefully improved.
+
+Since the I2DATE line_info flag is never set in the owamp code the
+value is never logged anyway.
+---
+ owamp/owamp.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/owamp/owamp.h b/owamp/owamp.h
+index 82bd05e..73ef6de 100644
+--- a/owamp/owamp.h
++++ b/owamp/owamp.h
+@@ -465,7 +465,7 @@ OWPExpContextFree(
+  *
+  * (Sure would be nice if it were possible to to vararg macros...)
+  */
+-#define OWPError        I2ErrLocation_(__FILE__,__DATE__,__LINE__);        \
++#define OWPError        I2ErrLocation_(__FILE__,"",__LINE__);        \
+     OWPError_
+ 
+ /*

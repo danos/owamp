@@ -1,0 +1,170 @@
+From: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+Date: Mon, 12 Jun 2017 12:17:03 +0100
+Subject: Improve O/TWAMP client input validation
+
+The ow/twping program does sporadic input validation, the validation
+for some flags is better than others.
+
+For example, the following command produces an error message:
+$ /usr/bin/twping localhost -c a
+twping: Invalid value. Positive integer expected
+
+Yet, this instance does not and starts a bogus session:
+$ /usr/bin/twping localhost -c -1
+
+Therefore improve input validation by checking that strtod/strtoul
+return correctly by checking errno when appropriate.
+
+Add bounds checking where necessary.
+
+Check that negative values aren't passed to strtoul
+
+Improve error messages
+---
+ owping/owping.c | 54 +++++++++++++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 45 insertions(+), 9 deletions(-)
+
+diff --git a/owping/owping.c b/owping/owping.c
+index 2061b06..f5b405b 100644
+--- a/owping/owping.c
++++ b/owping/owping.c
+@@ -64,6 +64,9 @@ static uint32_t     file_oset,tstamp_oset,ext_oset;
+ 
+ #define OWP_PADDING_UNSET (~0)
+ 
++#define STR(S)      #S
++#define STREXP(S)   STR(S)
++
+ static void
+ print_conn_args(
+         void
+@@ -914,8 +917,9 @@ parse_slots(
+         char    *endptr;
+         double    dval;
+ 
++        errno = 0;
+         dval = strtod(tstr,&endptr);
+-        if(endptr == tstr){
++        if((errno == ERANGE) || (endptr == tstr) || (dval < 0.0)){
+             I2ErrLogP(eh,errno,
+                     "Invalid numeric value (%s) for schedule",
+                     tstr);
+@@ -1192,6 +1196,22 @@ signal_catch(
+     return;
+ }
+ 
++/*
++ * Exit printing msg and usage if errno equals ERANGE
++ */
++static inline void
++check_errno_erange(
++    char *progname,
++    char *msg
++    )
++{
++    if (errno == ERANGE) {
++        if (msg) usage(progname, msg);
++        else usage(progname, "Invalid value. Out of range");
++        exit(1);
++    }
++}
++
+ int
+ main(
+         int     argc,
+@@ -1378,10 +1398,13 @@ main(
+                 /* Test options. */
+ 
+             case 'c':
++                errno = 0;
+                 ping_ctx.opt.numPackets = strtoul(optarg, &endptr, 10);
+-                if (*endptr != '\0') {
++                check_errno_erange(progname, "Invalid value. Too large");
++                if ((optarg[0] == '-') || (*endptr != '\0') ||
++                        (ping_ctx.opt.numPackets < 1)) {
+                     usage(progname,
+-                            "Invalid value. Positive integer expected");
++                            "Invalid value. Integer greater than 0 expected");
+                     exit(1);
+                 }
+                 break;
+@@ -1412,7 +1435,9 @@ main(
+                 }
+                 break;
+             case 'E':
++                errno = 0;
+                 ping_ctx.opt.endDelay = strtod(optarg,&endptr);
++                check_errno_erange(progname, NULL);
+                 if((*endptr != '\0') ||
+                         (ping_ctx.opt.endDelay < 0.0)){
+                     usage(progname, 
+@@ -1448,14 +1473,17 @@ main(
+                 break;
+             case 's':
+                 ping_ctx.opt.padding = strtoul(optarg, &endptr, 10);
+-                if (*endptr != '\0') {
+-                    usage(progname, 
+-                            "Invalid value. Positive integer expected");
++                if ((*endptr != '\0') ||
++                        (ping_ctx.opt.padding > MAX_PADDING_SIZE)) {
++                    usage(progname, "Invalid value. Integer between 0 and "
++                            STREXP(MAX_PADDING_SIZE)" expected");
+                     exit(1);
+                 }
+                 break;
+             case 'L':
++                errno = 0;
+                 ping_ctx.opt.lossThreshold = strtod(optarg,&endptr);
++                check_errno_erange(progname, NULL);
+                 if((*endptr != '\0') ||
+                         (ping_ctx.opt.lossThreshold < 0.0)){
+                     usage(progname, 
+@@ -1497,7 +1525,9 @@ main(
+                 }
+                 break;
+             case 'z':
++                errno = 0;
+                 ping_ctx.opt.delayStart = strtod(optarg,&endptr);
++                check_errno_erange(progname, NULL);
+                 if((*endptr != '\0') ||
+                         (ping_ctx.opt.delayStart < 0.0)){
+                     usage(progname, 
+@@ -1509,11 +1539,13 @@ main(
+                 /* Output options */
+ 
+             case 'b':
++                errno = 0;
+                 ping_ctx.opt.bucket_width = strtod(optarg,&endptr);
++                check_errno_erange(progname, NULL);
+                 if((*endptr != '\0') ||
+                         (ping_ctx.opt.bucket_width <= 0.0)){
+                     usage(progname, 
+-                            "Invalid \'-b\' value. Positive float expected");
++                            "Invalid \'-b\' value. Float greater than 0.0 expected");
+                     exit(1);
+                 }
+                 break;
+@@ -1527,8 +1559,10 @@ main(
+                 ping_ctx.opt.records = True;
+ 
+ 		if (optarg != NULL) {
++		  errno = 0;
+ 		  ping_ctx.opt.rec_limit = strtoul(optarg, &endptr, 10);
+-		  if (*endptr != '\0') {
++		  check_errno_erange(progname, "Invalid value. Too large");
++		  if ((optarg[0] == '-') || (*endptr != '\0')) {
+                     usage(progname,
+ 			  "Invalid \"-v\" value. Positive integer expected");
+                     exit(1);
+@@ -1546,8 +1580,10 @@ main(
+                 ping_ctx.opt.units = optarg[0];
+                 break;
+             case 'N':
++                errno = 0;
+                 ping_ctx.opt.numBucketPackets = strtoul(optarg, &endptr, 10);
+-                if (*endptr != '\0') {
++                check_errno_erange(progname, "Invalid value. Too large");
++                if ((optarg[0] == '-') || (*endptr != '\0')) {
+                     usage(progname,
+                             "Invalid \"-N\" value. Positive integer expected");
+                     exit(1);

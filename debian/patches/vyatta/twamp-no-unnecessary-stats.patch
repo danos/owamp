@@ -1,0 +1,98 @@
+From: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+Date: Mon, 12 Jun 2017 12:17:04 +0100
+Subject: Don't display meaningless TWAMP stats
+
+There is no need to continue calculating or displaying stats if all
+test packets in a session were lost or if no packets were sent.
+Display a confirmation of these scenarios instead.
+---
+ owamp/stats.c | 62 +++++++++++++++++++++++++++++++++++++++++++----------------
+ 1 file changed, 45 insertions(+), 17 deletions(-)
+
+diff --git a/owamp/stats.c b/owamp/stats.c
+index 8e07a12..2d355da 100644
+--- a/owamp/stats.c
++++ b/owamp/stats.c
+@@ -1886,6 +1886,48 @@ OWPStatsScaleFactor(
+     return factor;
+ }
+ 
++static OWPBoolean
++PrintPacketCounts(
++        OWPStats    stats,
++        FILE        *output
++        )
++{
++    double percent;
++
++    /*
++     * lost % is 0 if sent == 0.
++     */
++    if(stats->sent > 0){
++        percent = (double)stats->lost/stats->sent;
++    }
++    else{
++        percent = 0.0;
++    }
++
++    if(stats->hdr->twoway){
++        if(stats->sent == 0){
++            fprintf(output,"No packets were sent!\n");
++            return False;
++        }
++
++        fprintf(output,"%u sent, %u lost (%.3f%%)",stats->sent,
++                stats->lost,100.0*percent);
++        if(stats->sent == stats->lost){
++            fprintf(output,"\nAll sent packets were lost!\n");
++            return False;
++        }
++
++        fprintf(output,", %u send duplicates, %u reflect duplicates\n",
++                stats->dups[TWP_FWD_PKTS],stats->dups[TWP_BCK_PKTS]);
++    }
++    else{
++        fprintf(output,"%u sent, %u lost (%.3f%%), %u duplicates\n",stats->sent,
++                       stats->lost,100.0*percent,stats->dups[OWP_PKTS]);
++    }
++
++    return True;
++}
++
+ static void
+ PrintDelayStats(
+         OWPStats        stats,
+@@ -2184,23 +2226,8 @@ OWPStatsPrintSummary(
+             stval,((float)sspec.tv_nsec)/MILLION,
+             etval,((float)espec.tv_nsec)/MILLION);
+ 
+-    /*
+-     * lost % is 0 if sent == 0.
+-     */
+-    if(stats->sent > 0){
+-        d1 = (double)stats->lost/stats->sent;
+-    }
+-    else{
+-        d1 = 0.0;
+-    }
+-    fprintf(output,"%u sent, %u lost (%.3f%%), ",
+-                    stats->sent,stats->lost,100.0*d1);
+-    if(stats->hdr->twoway){
+-        fprintf(output,"%u send duplicates, %u reflect duplicates\n",
+-                stats->dups[TWP_FWD_PKTS],stats->dups[TWP_BCK_PKTS]);
+-    }
+-    else{
+-        fprintf(output,"%u duplicates\n",stats->dups[OWP_PKTS]);
++    if(!PrintPacketCounts(stats,output)){
++        goto finish;
+     }
+ 
+     PrintDelayStats(stats,output,OWP_DELAY);
+@@ -2268,6 +2295,7 @@ OWPStatsPrintSummary(
+         }
+     }
+ 
++finish:
+     fprintf(output,"\n");
+ 
+     return True;

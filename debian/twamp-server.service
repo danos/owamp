@@ -1,12 +1,18 @@
 [Unit]
 Description=TWAMP server
-After=network.target
+After=network-online.target remote-fs.target systemd-journald-dev-log.socket
+Wants=network-online.target
+PartOf=twampd.target
 
 [Service]
 Type=forking
-PIDFile=/var/run/twamp-server.pid
-ExecStart=/usr/sbin/twampd -c /etc/twamp-server -R /var/run
+Restart=on-failure
+PIDFile=/run/twamp-server.pid
+ExecStart=/usr/sbin/twampd -c /etc/twamp-server -R /run
 LimitNOFILE=4096
+
+# default dieby + 1
+TimeoutStopSec=6
 
 [Install]
 WantedBy=multi-user.target

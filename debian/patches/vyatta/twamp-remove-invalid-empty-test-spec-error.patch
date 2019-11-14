@@ -1,0 +1,45 @@
+From: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+Date: Mon, 12 Jun 2017 12:17:04 +0100
+Subject: twampd: Prevent invalid test spec error message
+
+When twampd accepts a session it logs the following error:
+
+  OWPTestPacketRate: Invalid empty test specification
+
+This happens because OWPTestSpec.nslots is 0 for TWAMP sessions. This
+is expected since nslots is populated from the "Number of Scheduled
+Slots" field in the Request-TW-Session message, which is always 0 as
+per RFC5357 section 3.5.
+---
+ owamp/endpoint.c | 18 ++++++++++++------
+ 1 file changed, 12 insertions(+), 6 deletions(-)
+
+diff --git a/owamp/endpoint.c b/owamp/endpoint.c
+index eebd8d9..c8a031c 100644
+--- a/owamp/endpoint.c
++++ b/owamp/endpoint.c
+@@ -675,12 +675,18 @@ success:
+ #define PACKBUFFALLOCFACTOR        2
+ 
+         ep->freelist=NULL;
+-        ep->numalist = OWPTestPacketRate(cntrl->ctx,
+-                &tsession->test_spec) *
+-            OWPNum64ToDouble(
+-                    tsession->test_spec.loss_timeout) *
+-            PACKBUFFALLOCFACTOR;
+-        ep->numalist = MAX(ep->numalist,100);
++
++        if(cntrl->twoway){
++            ep->numalist = 100;
++        }
++        else{
++            ep->numalist = OWPTestPacketRate(cntrl->ctx,
++                    &tsession->test_spec) *
++                OWPNum64ToDouble(
++                        tsession->test_spec.loss_timeout) *
++                PACKBUFFALLOCFACTOR;
++            ep->numalist = MAX(ep->numalist,100);
++        }
+ 
+         if(!(alist = calloc(ep->numalist,sizeof(OWPLostPacketRec)))){
+             OWPError(cntrl->ctx,OWPErrFATAL,errno,"calloc(): %M");

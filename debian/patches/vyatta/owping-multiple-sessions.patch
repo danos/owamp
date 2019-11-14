@@ -1,0 +1,285 @@
+From: Robert Shearman <robert.shearman@att.com>
+Date: Mon, 12 Jun 2017 12:17:03 +0100
+Subject: Add owping/twping option to use multiple test sessions
+
+This is useful for testing purposes, even if it has no good production use.
+---
+ doc/owping_test_opts.man |  11 ++++
+ owping/owping.c          | 146 +++++++++++++++++++++++++++++------------------
+ owping/owpingP.h         |   2 +
+ 3 files changed, 103 insertions(+), 56 deletions(-)
+
+diff --git a/doc/owping_test_opts.man b/doc/owping_test_opts.man
+index 4572501..6609c81 100644
+--- a/doc/owping_test_opts.man
++++ b/doc/owping_test_opts.man
+@@ -205,6 +205,17 @@ and both numbers must be valid port values. (16 bit unsigned integer values)
+ 0
+ .RE
+ .TP
++\fB\-r\fR \fIrepeats\fR
++.br
++Number of concurrent instances of the test(s) to be started. This
++results in multiple identical test sessions being created and run
++concurrently, with the results shown for each. Note that only the
++first session is output to any specified output file.
++.RS
++.IP Default:
++1
++.RE
++.TP
+ \fB\-s\fR \fIsize\fR
+ .br
+ Size of the padding to add to each minimally-sized test packet. The minimal
+diff --git a/owping/owping.c b/owping/owping.c
+index 1331791..efbfcc6 100644
+--- a/owping/owping.c
++++ b/owping/owping.c
+@@ -113,6 +113,7 @@ print_test_args(
+             "   -i wait        mean average time between packets (seconds)\n"
+             "   -L timeout     maximum time to wait for a packet before declaring it lost (seconds)\n"
+             "   -P portrange   port range to use during the test\n"
++            "   -r repeats     number of test sessions in which to repeat results\n"
+             "   -s padding     size of the padding added to each packet (bytes)\n"
+ #ifndef TWAMP
+             "   -t | -T file   perform one-way test to testhost [and save results to file]\n"
+@@ -1203,20 +1204,21 @@ main(
+     OWPSlot             slot;
+     OWPNum64            rtt_bound;
+     OWPNum64            delayStart;
+-    OWPSID              tosid;
++    OWPSID              *tosid;
+     OWPAcceptType       acceptval;
+     OWPErrSeverity      err;
+-    FILE                *fromfp=NULL;
++    FILE                **fromfp=NULL;
+     char                localbuf[NI_MAXHOST+1+NI_MAXSERV+1];
+     char                remotebuf[NI_MAXHOST+1+NI_MAXSERV+1];
+     char                *local, *remote;
+     struct sigaction    setact;
++    uint32_t            sess_idx;
+ 
+     int                 ch;
+     char                *endptr = NULL;
+     char                optstring[128];
+     static char         *conn_opts = "64A:k:S:u:B:X:";
+-    static char         *test_opts = "c:D:E:F:i:L:P:s:z:";
++    static char         *test_opts = "c:D:E:F:i:L:P:r:s:z:";
+     static char         *out_opts = "a:b:d:Mn:N:pQRv::U";
+     static char         *gen_opts = "h";
+ #ifdef TWAMP
+@@ -1287,6 +1289,7 @@ main(
+     ping_ctx.opt.units = 'm';
+     ping_ctx.opt.numBucketPackets = 0;
+     ping_ctx.opt.bucket_width = 0.0001;
++    ping_ctx.opt.sessionCount = 1;
+ 
+     ping_ctx.opt.portspec = &ping_ctx.portrec;
+ 
+@@ -1481,6 +1484,14 @@ main(
+                     ping_ctx.opt.portspec = &ping_ctx.portrec;
+                 }
+ 
++                break;
++            case 'r':
++                ping_ctx.opt.sessionCount = strtoul(optarg, &endptr, 10);
++                if (*endptr != '\0' || ping_ctx.opt.sessionCount > 65535) {
++                    usage(progname,
++                            "Invalid value. Integer between 0 and 65535 expected");
++                    exit(1);
++                }
+                 break;
+             case 'z':
+                 ping_ctx.opt.delayStart = strtod(optarg,&endptr);
+@@ -1857,36 +1868,51 @@ main(
+ 
+         if(owp_intr) exit(2);
+ 
++        tosid = calloc(ping_ctx.opt.sessionCount, sizeof(*tosid));
++        if (!tosid) {
++            I2ErrLog(eh, "Unable to allocate session ids: %M");
++            exit(1);
++        }
++        fromfp = calloc(ping_ctx.opt.sessionCount, sizeof(*fromfp));
++        if (!fromfp) {
++            I2ErrLog(eh, "Unable to allocate fromfp array: %M");
++            exit(1);
++        }
++
+ #ifdef TWAMP
+-        if (ping_ctx.opt.save_from_test) {
+-            fromfp = fopen(ping_ctx.opt.save_from_test,
++        for (sess_idx = 0; sess_idx < ping_ctx.opt.sessionCount; sess_idx++) {
++            if (ping_ctx.opt.save_from_test && sess_idx == 0) {
++                fromfp[sess_idx] = fopen(ping_ctx.opt.save_from_test,
+                            "w+b");
+-            if(!fromfp){
+-                I2ErrLog(eh,"fopen(%s): %M",
+-                         ping_ctx.opt.save_from_test);
++                if(!fromfp[sess_idx]){
++                    I2ErrLog(eh,"fopen(%s): %M",
++                             ping_ctx.opt.save_from_test);
++                    exit(1);
++                }
++            } else if( !(fromfp[sess_idx] = tfile(eh))){
+                 exit(1);
+             }
+-        } else if( !(fromfp = tfile(eh))){
+-            exit(1);
+-        }
+ 
+-        if (!OWPSessionRequest(ping_ctx.cntrl, NULL, False,
+-                               I2AddrByNode(eh,ping_ctx.remote_test),
+-                               True,ping_ctx.opt.zero_addr,
+-                               (OWPTestSpec*)&tspec,
+-                               fromfp,tosid,&err_ret))
+-            FailSession(ping_ctx.cntrl);
++            if (!OWPSessionRequest(ping_ctx.cntrl, NULL, False,
++                                   I2AddrByNode(eh,ping_ctx.remote_test),
++                                   True,ping_ctx.opt.zero_addr,
++                                   (OWPTestSpec*)&tspec,
++                                   fromfp[sess_idx],tosid[sess_idx],&err_ret))
++                FailSession(ping_ctx.cntrl);
++        }
+ #else
+         /*
+          * Prepare paths for datafiles. Unlink if not keeping data.
+          */
+         if(ping_ctx.opt.to) {
+-            if (!OWPSessionRequest(ping_ctx.cntrl, NULL, False,
+-                        I2AddrByNode(eh,ping_ctx.remote_test),
+-                        True,ping_ctx.opt.zero_addr,
+-                        (OWPTestSpec*)&tspec,
+-                        NULL,tosid,&err_ret))
+-                FailSession(ping_ctx.cntrl);
++            for (sess_idx = 0; sess_idx < ping_ctx.opt.sessionCount; sess_idx++) {
++                if (!OWPSessionRequest(ping_ctx.cntrl, NULL, False,
++                                       I2AddrByNode(eh,ping_ctx.remote_test),
++                                       True,ping_ctx.opt.zero_addr,
++                                       (OWPTestSpec*)&tspec,NULL,
++                                       tosid[sess_idx],&err_ret))
++                    FailSession(ping_ctx.cntrl);
++            }
+         }
+ 
+         if(owp_intr) exit(2);
+@@ -1894,24 +1920,26 @@ main(
+         if(ping_ctx.opt.from) {
+             OWPSID fromsid;
+ 
+-            if (ping_ctx.opt.save_from_test) {
+-                fromfp = fopen(ping_ctx.opt.save_from_test,
+-                        "w+b");
+-                if(!fromfp){
+-                    I2ErrLog(eh,"fopen(%s): %M", 
+-                            ping_ctx.opt.save_from_test);
++            for (sess_idx = 0; sess_idx < ping_ctx.opt.sessionCount; sess_idx++) {
++                if (ping_ctx.opt.save_from_test && sess_idx == 0) {
++                    fromfp[sess_idx] = fopen(ping_ctx.opt.save_from_test,
++                                   "w+b");
++                    if(!fromfp[sess_idx]){
++                        I2ErrLog(eh,"fopen(%s): %M",
++                                 ping_ctx.opt.save_from_test);
++                        exit(1);
++                    }
++                } else if( !(fromfp[sess_idx] = tfile(eh))){
+                     exit(1);
+                 }
+-            } else if( !(fromfp = tfile(eh))){
+-                exit(1);
+-            }
+ 
+-            if (!OWPSessionRequest(ping_ctx.cntrl,
+-                        I2AddrByNode(eh,ping_ctx.remote_test),
+-                        True, NULL, False, ping_ctx.opt.zero_addr,
+-                        (OWPTestSpec*)&tspec,
+-                        fromfp,fromsid,&err_ret))
+-                FailSession(ping_ctx.cntrl);
++                if (!OWPSessionRequest(ping_ctx.cntrl,
++                                       I2AddrByNode(eh,ping_ctx.remote_test),
++                                       True, NULL, False,ping_ctx.opt.zero_addr,
++                                       (OWPTestSpec*)&tspec,
++                                       fromfp[sess_idx],fromsid,&err_ret))
++                    FailSession(ping_ctx.cntrl);
++            }
+         }
+ #endif
+ 
+@@ -2032,40 +2060,46 @@ main(
+                     !ping_ctx.opt.quiet || ping_ctx.opt.raw)){
+             FILE    *tofp;
+ 
+-            if( !(tofp = owp_fetch_sid(ping_ctx.opt.save_to_test,
+-                            ping_ctx.cntrl,tosid))){
+-                char    sname[sizeof(OWPSID)*2 + 1];
+-                I2HexEncode(sname,tosid,sizeof(OWPSID));
+-                I2ErrLog(eh,"Unable to fetch data for sid(%s)",sname);
+-            }
+-            else if(!ping_ctx.opt.quiet || ping_ctx.opt.raw){
+-                if( do_stats(ctx,tofp,local,remote,NULL)){
+-                    I2ErrLog(eh, "do_stats(\"to\" session)");
++            for (sess_idx = 0; sess_idx < ping_ctx.opt.sessionCount; sess_idx++) {
++                if( !(tofp = owp_fetch_sid(ping_ctx.opt.save_to_test,
++                                           ping_ctx.cntrl,tosid[sess_idx]))){
++                    char    sname[sizeof(OWPSID)*2 + 1];
++                    I2HexEncode(sname,tosid[sess_idx],sizeof(OWPSID));
++                    I2ErrLog(eh,"Unable to fetch data for sid(%s)",sname);
++                }
++                else if(!ping_ctx.opt.quiet || ping_ctx.opt.raw){
++                    if( do_stats(ctx,tofp,local,remote,NULL)){
++                        I2ErrLog(eh, "do_stats(\"to\" session)");
++                    }
++                }
++                if(tofp && fclose(tofp)){
++                    I2ErrLog(eh,"close(): %M");
+                 }
+-            }
+-            if(tofp && fclose(tofp)){
+-                I2ErrLog(eh,"close(): %M");
+             }
+         }
+ #endif
+ 
+         if(owp_intr > 1) exit(2);
+ 
+-        if(fromfp && (!ping_ctx.opt.quiet || ping_ctx.opt.raw)){
+-            if( do_stats(ctx,fromfp,
++        for (sess_idx = 0; sess_idx < ping_ctx.opt.sessionCount; sess_idx++) {
++            if(fromfp[sess_idx] && (!ping_ctx.opt.quiet || ping_ctx.opt.raw)){
++                if( do_stats(ctx,fromfp[sess_idx],
+ #ifdef TWAMP
+                          local,remote,
+ #else
+                          remote,local,
+ #endif
+                          &tspec)){
+-                I2ErrLog(eh, "do_stats(\"from\" session)");
++                    I2ErrLog(eh, "do_stats(\"from\" session)");
++                }
+             }
+-        }
+ 
+-        if(fromfp && fclose(fromfp)){
+-            I2ErrLog(eh,"close(): %M");
++            if(fromfp[sess_idx] && fclose(fromfp[sess_idx])){
++                I2ErrLog(eh,"close(): %M");
++            }
+         }
++        free(fromfp);
++        free(tosid);
+ 
+     }
+ 
+diff --git a/owping/owpingP.h b/owping/owpingP.h
+index 1d4de3b..87b6fed 100644
+--- a/owping/owpingP.h
++++ b/owping/owpingP.h
+@@ -93,6 +93,8 @@ typedef    struct {
+         uint32_t        padding;            /* -s */
+ 
+         uint32_t        controlDscp;        /* -X */
++
++        uint32_t        sessionCount;       /* -r */
+     } opt;
+ 
+     char                *remote_test;
