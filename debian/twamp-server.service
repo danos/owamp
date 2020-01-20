@@ -9,7 +9,8 @@ Type=forking
 Restart=on-failure
 PIDFile=/run/twamp-server.pid
 ExecStart=/usr/sbin/twampd -c /etc/twamp-server -R /run
-LimitNOFILE=4096
+LimitNOFILE=8192
+TasksMax=8193
 
 # default dieby + 1
 TimeoutStopSec=6
