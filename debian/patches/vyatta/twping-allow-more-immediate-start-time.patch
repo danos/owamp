@@ -1,0 +1,89 @@
+From: Duncan Eastoe <duncan.eastoe@att.com>
+Date: Wed, 8 Jan 2020 12:19:52 +0000
+Subject: twping: Allow more immediate start time
+
+Currently twping estimates a session start time based on an estimated
+round trip time for the remaining control messages plus 1 second.
+This can be overidden by using the start delay (-z) option, however
+this will only take effect if the specified delay is greater than
+this estimate.
+
+Since the TWAMP client only starts sending test packets after it has
+received the Start-Ack message from the server we know that both
+sides are ready and willing to start the session as soon as the
+client receives this message. Therefore we can allow twping to be
+configured to use a more immediate start time, such that the session
+is likely to start as soon as the Start-Ack is received.
+
+This is done by relaxing the start delay restriction for twping. Now,
+if the provided start delay is less than the estimate the start time
+is re-calculated using the estimated round trip time for the
+remaining control messages plus the provided start delay value (rather
+than the previous hardcoded 1 second).
+---
+ owping/owping.c | 33 ++++++++++++++++++++++++++-------
+ 1 file changed, 26 insertions(+), 7 deletions(-)
+
+diff --git a/owping/owping.c b/owping/owping.c
+index 55c0714..e9b7400 100644
+--- a/owping/owping.c
++++ b/owping/owping.c
+@@ -1443,7 +1443,7 @@ main(
+         = ping_ctx.opt.interface = NULL;
+     ping_ctx.opt.numPackets = 100;
+     ping_ctx.opt.lossThreshold = 0.0;
+-    ping_ctx.opt.delayStart = 0.0;
++    ping_ctx.opt.delayStart = -1.0;
+     ping_ctx.opt.statsDumpInterval = 0;
+     ping_ctx.opt.percentiles = NULL;
+     ping_ctx.opt.padding = OWP_PADDING_UNSET;
+@@ -2063,10 +2063,19 @@ main(
+             I2ErrLogP(eh,errno,"Unable to get current time: %M");
+             exit(1);
+         }
++
+         /* using ch to hold num_rtt */
++#ifdef TWAMP
++        /*
++         * For TWAMP there are always two messages exchanged before
++         * the session starts, Request-TW-Session and Start-Sessions.
++         */
++        ch = 2;
++#else
+         ch = 1;    /* startsessions command */
+         if(ping_ctx.opt.to) ch++;
+         if(ping_ctx.opt.from) ch++;
++#endif
+         tspec.start_time = OWPNum64Add(OWPNum64Mult(rtt_bound,
+                                         OWPULongToNum64(ch)),
+                                     OWPULongToNum64(1));
+@@ -2075,13 +2084,23 @@ main(
+          * If the specified start time is greater than the "min"
+          * start time, then use it.
+          */
+-        if(ping_ctx.opt.delayStart > 0.0){
++        if(ping_ctx.opt.delayStart >= 0.0){
+             delayStart = OWPDoubleToNum64(ping_ctx.opt.delayStart);
+-        }else{
+-            delayStart = OWPULongToNum64(0);
+-        }
+-        if(OWPNum64Cmp(delayStart,tspec.start_time) > 0){
+-            tspec.start_time = delayStart;
++            if(OWPNum64Cmp(delayStart,tspec.start_time) > 0){
++                tspec.start_time = delayStart;
++            }
++#ifdef TWAMP
++            else{
++                /*
++                 * If a small start delay (ie. less than the estimated one)
++                 * is given then we allow it to be used as an additive delay
++                 * to the RTT estimate, instead of the default 1 second.
++                 */
++                tspec.start_time = OWPNum64Add(OWPNum64Mult(rtt_bound,
++                                                            OWPULongToNum64(ch)),
++                                               OWPULongToNum64(delayStart));
++            }
++#endif
+         }
+ 
+         /*
