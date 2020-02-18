@@ -1,0 +1,482 @@
+From: Duncan Eastoe <duncan.eastoe@att.com>
+Date: Fri, 10 Jan 2020 18:49:59 +0000
+Subject: schedule: "cycle to" scheduling for TWAMP
+
+Today the send scheduling behaviour for TWAMP sessions mirrors that
+for OWAMP sessions. The schedule is determined by defining a series
+of slots, with each slot representing a delay value. When sending a
+test packet we look at the current slot and wait for the delay period
+prior to sending the packet. Before sending the next test packet we
+move to the next slot and repeat the process. Once we reach the final
+slot we circle back to the first slot for the next packet, and this
+continues for the duration of the test.
+
+This commit adds support for "cycle to" schedules for TWAMP sessions.
+A "cycle to" schedule is one where we do not cycle back to the first
+slot once we reach the final slot, we instead cycle back to a later
+slot which can be specified by the setting of a flag on the slot.
+
+To enable a "cycle to" schedule the TWP_SLOT_FLAG_CYCLE_TO flag
+should be set on the OWPSlot representing the slot which should be
+cycled to each time the last slot is reached.
+
+This flag must not be set for OWAMP schedules since the scheduling
+behaviour is part of the protocol, defined by the RFC.
+---
+ owamp/api.c      |  55 +++++++++++++++++++++++--
+ owamp/owamp.h    |   5 +++
+ owamp/schedule.c |  66 +++++++++++++++++++++++-------
+ test/api.c       |  57 ++++++++++++++++++++++++++
+ test/schedule.c  | 119 +++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 285 insertions(+), 17 deletions(-)
+
+diff --git a/owamp/api.c b/owamp/api.c
+index 112d1af..42627b3 100644
+--- a/owamp/api.c
++++ b/owamp/api.c
+@@ -426,8 +426,9 @@ OWPTestPacketRate(
+         OWPTestSpec *tspec
+         )
+ {
+-    OWPNum64    duration = OWPULongToNum64(0);
+-    uint32_t   i;
++    OWPNum64 duration = OWPULongToNum64(0);
++    double   range;
++    uint32_t i, cycle_to_slot = 0;
+ 
+     if(!tspec){
+         OWPError(ctx,OWPErrFATAL,OWPErrINVALID,
+@@ -442,14 +443,62 @@ OWPTestPacketRate(
+     }
+ 
+     for(i=0;i<tspec->nslots;i++){
++        if(tspec->npackets && tspec->slots[i].flags & TWP_SLOT_FLAG_CYCLE_TO){
++            cycle_to_slot = i;
++            break;
++        }
+         duration = OWPNum64Add(duration,tspec->slots[i].any.mean_delay);
+     }
+ 
++    if(!cycle_to_slot){
++        /*
++         * If we summed all slots then we calculate a simple average
++         * packet rate. This calculation is always used for OWAMP tests,
++         * and it will be used in most TWAMP tests (by default at least).
++         */
++        range = (double)tspec->nslots;
++    }
++    else{
++        /*
++         * If we still have slots to process this means that a slot in the
++         * schedule has TWP_SLOT_FLAG_CYCLE_TO set. In this mode only the
++         * slots including and following that with the flag set are used
++         * cyclically throughout the test. The initial slots we have already
++         * summed are used only once.
++         *
++         * Therefore to calculate the average packet rate for these schedules
++         * we must know the number of packets we intend to send and divide
++         * that by the sum of the entire send schedule.
++         *
++         * This calculation should only be used for TWAMP tests, since such
++         * schedules are invalid for OWAMP.
++         */
++        OWPNum64 cycle_duration = OWPULongToNum64(0);
++        double num_cycles;
++
++        range = (double)tspec->npackets;
++
++        /*
++         * How many cycles of the subset of the schedule is needed to
++         * send the remaining packets?
++         */
++        num_cycles = (double)(tspec->npackets-cycle_to_slot) / \
++                     (double)(tspec->nslots-cycle_to_slot);
++
++        for(;i<tspec->nslots;i++)
++            cycle_duration = OWPNum64Add(cycle_duration,
++                                         tspec->slots[i].any.mean_delay);
++
++        cycle_duration = OWPNum64Mult(cycle_duration,
++                                      OWPDoubleToNum64(num_cycles));
++        duration = OWPNum64Add(duration,cycle_duration);
++    }
++
+     if(duration <= 0){
+         return 0;
+     }
+ 
+-    return (double)tspec->nslots / OWPNum64ToDouble(duration);
++    return range / OWPNum64ToDouble(duration);
+ }
+ 
+ /* These lengths assume no IP options. */
+diff --git a/owamp/owamp.h b/owamp/owamp.h
+index 3e9bf0a..4b3e5bf 100644
+--- a/owamp/owamp.h
++++ b/owamp/owamp.h
+@@ -370,6 +370,11 @@ typedef struct{
+     OWPNum64    mean_delay;
+ } OWPSlotAny;
+ 
++/*
++ * Only the top 4 bits of the flags field is used.
++ */
++#define TWP_SLOT_FLAG_CYCLE_TO  (1 << 4)
++
+ typedef struct OWPSlotStruct{
+     OWPSlotType     slot_type;
+     uint8_t         flags;
+diff --git a/owamp/schedule.c b/owamp/schedule.c
+index f4eba0f..62ab33c 100644
+--- a/owamp/schedule.c
++++ b/owamp/schedule.c
+@@ -39,7 +39,9 @@ struct OWPScheduleContextRec {
+ 
+     uint64_t               i;        /* current index for generation */
+     uint64_t               maxi;
++    uint32_t               current_slot;
+     uint32_t               nslots;
++    uint32_t               cycle_to_slot;
+     OWPSlot                 *slots;
+ };
+ 
+@@ -249,6 +251,20 @@ OWPExpContextNext(
+             LN2);
+ }
+ 
++static
++int CheckSlot(
++        OWPSlot *slot
++        )
++{
++    switch(slot->slot_type){
++        case OWPSlotRandExpType:
++        case OWPSlotLiteralType:
++            return 0;
++        default:
++            return 1;
++    }
++}
++
+ /*
+  * Function:        CheckSlots
+  *
+@@ -274,15 +290,9 @@ int CheckSlots(
+     uint32_t   i;
+ 
+     for(i=0;i<tspec->nslots;i++){
+-
+-        switch(tspec->slots[i].slot_type){
+-            case OWPSlotRandExpType:
+-            case OWPSlotLiteralType:
+-                break;
+-            default:
+-                OWPError(ctx,OWPErrFATAL,EINVAL,
+-                        "OWPScheduleContextGenerateNextDelta: Invalid slot");
+-                return 1;
++        if(CheckSlot(&tspec->slots[i])){
++            OWPError(ctx,OWPErrFATAL,EINVAL, "CheckSlots: Invalid slot");
++            return 1;
+         }
+     }
+ 
+@@ -339,13 +349,34 @@ OWPScheduleContextCreate(
+         )
+ {
+     OWPScheduleContext  sctx;
++    uint32_t cycle_to_slot = 0;
++    uint32_t i;
+ 
+-    if(!tspec || !tspec->slots || !tspec->nslots || CheckSlots(ctx,tspec)){
++    if(!tspec || !tspec->slots || !tspec->nslots){
+         OWPError(ctx,OWPErrFATAL,OWPErrINVALID,
+                 "OWPScheduleContextCreate: Invalid tspec");
+         return NULL;
+     }
+ 
++    for(i=0;i<tspec->nslots;i++){
++        OWPSlot *slot = &tspec->slots[i];
++
++        if(CheckSlot(slot)){
++            OWPError(ctx,OWPErrFATAL,OWPErrINVALID,
++                "OWPScheduleContextCreate: tspec slot invalid");
++            return NULL;
++        }
++
++        if(slot->flags & TWP_SLOT_FLAG_CYCLE_TO){
++            if(cycle_to_slot){
++                OWPError(ctx,OWPErrFATAL,OWPErrINVALID,
++                    "OWPScheduleContextCreate: Cycles to %u and %u", cycle_to_slot, i);
++                return NULL;
++            }
++            cycle_to_slot = i;
++        }
++    }
++
+     sctx = malloc(sizeof(*sctx));
+     if (!sctx){
+         OWPError(ctx,OWPErrFATAL,OWPErrUNKNOWN,"malloc(): %M");
+@@ -364,10 +395,11 @@ OWPScheduleContextCreate(
+     memset(sctx->exp.out,0,16);
+     memset(sctx->exp.counter,0,16);
+ 
+-    sctx->i = 0;
++    sctx->i = sctx->current_slot = 0;
+     sctx->maxi = tspec->npackets;
+     sctx->nslots = MIN(tspec->nslots,tspec->npackets);
+     sctx->slots = tspec->slots;
++    sctx->cycle_to_slot = cycle_to_slot;
+ 
+     return(sctx);
+ }
+@@ -398,7 +430,7 @@ OWPScheduleContextReset(
+ {
+     memset(sctx->exp.out,0,16);
+     memset(sctx->exp.counter,0,16);
+-    sctx->i = 0;
++    sctx->i = sctx->current_slot = 0;
+ 
+     if(sid && tspec){
+ 
+@@ -441,14 +473,20 @@ OWPScheduleContextGenerateNextDelta(
+         OWPScheduleContext  sctx
+         )
+ {
+-    OWPSlot *slot;
++    OWPSlot  *slot;
++    uint32_t slot_index;
+ 
+     if(sctx->i >= sctx->maxi){
+         OWPError(sctx->ctx,OWPErrFATAL,OWPErrUNKNOWN,
+                 "OWPScheduleContextGenerateNextDelta: Schedule complete");
+         return OWPErrFATAL;
+     }
+-    slot = &sctx->slots[sctx->i++ % sctx->nslots];
++
++    if(sctx->current_slot >= sctx->nslots)
++        sctx->current_slot = sctx->cycle_to_slot;
++
++    slot = &sctx->slots[sctx->current_slot++];
++    sctx->i++;
+ 
+     switch(slot->slot_type){
+         case OWPSlotRandExpType:
+diff --git a/test/api.c b/test/api.c
+index 0ada927..53b8a50 100644
+--- a/test/api.c
++++ b/test/api.c
+@@ -99,6 +99,62 @@ START_TEST(test_OWPTestPacketRate_unusual)
+ }
+ END_TEST
+ 
++START_TEST(test_OWPTestPacketRate_cycle_to)
++{
++    OWPContext ctx;
++    double ret;
++    int i;
++    OWPSlot slots[5] = {
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(0) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .flags = TWP_SLOT_FLAG_CYCLE_TO,
++            .literal = { .offset = OWPULongToNum64(5) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(6) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(7) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(10) }
++        },
++    };
++    OWPTestSpec tspec = {
++        .npackets = 30,
++        .slots = (OWPSlot *)&slots,
++        .nslots = ARRAY_SIZE(slots),
++    };
++
++    CONTEXT_FOR_TEST_CASE(ctx);
++
++    ret = OWPTestPacketRate(ctx, &tspec);
++    ck_assert_double_eq_tol(ret, 0.1477, 0.0001);
++
++    /*
++     * If npackets is 0 then we should get the same rate as when
++     * TWP_SLOT_FLAG_CYCLE_TO is not set. Given that the first slot
++     * (which was previously skipped) is 0 the rate we get now should
++     * be a little faster than the one we previously calculated.
++     */
++    tspec.npackets = 0;
++    ret = OWPTestPacketRate(ctx, &tspec);
++    ck_assert_double_eq_tol(ret, 0.1785, 0.0001);
++
++    slots[1].flags &= ~TWP_SLOT_FLAG_CYCLE_TO;
++    ck_assert_double_eq(ret, OWPTestPacketRate(ctx, &tspec));
++
++    OWPContextFree(ctx);
++}
++END_TEST
++
+ Suite *apiTestSuite(void)
+ {
+     Suite *suite;
+@@ -109,6 +165,7 @@ Suite *apiTestSuite(void)
+     tcase_add_test(tests, test_OWPTestPacketRate_invalid_args);
+     tcase_add_test(tests, test_OWPTestPacketRate_simple);
+     tcase_add_test(tests, test_OWPTestPacketRate_unusual);
++    tcase_add_test(tests, test_OWPTestPacketRate_cycle_to);
+     suite_add_tcase(suite, tests);
+ 
+     return suite;
+diff --git a/test/schedule.c b/test/schedule.c
+index 53ba9c2..05a6de5 100644
+--- a/test/schedule.c
++++ b/test/schedule.c
+@@ -38,6 +38,7 @@ run_base_schedule_test(OWPContext ctx, OWPTestSpec *tspec)
+ 
+     ck_assert_ptr_eq(sctx->ctx, ctx);
+     ck_assert_uint_eq(sctx->i, 0);
++    ck_assert_uint_eq(sctx->current_slot, 0);
+     ck_assert_uint_eq(sctx->maxi, tspec->npackets);
+     ck_assert_uint_eq(sctx->nslots, MIN(tspec->nslots, tspec->npackets));
+     ck_assert_ptr_eq(sctx->slots, tspec->slots);
+@@ -174,6 +175,121 @@ START_TEST(test_GenerateNextDelta_overrun)
+ }
+ END_TEST
+ 
++START_TEST(test_GenerateNextDelta_cycle_to)
++{
++    OWPContext ctx;
++    OWPScheduleContext sctx;
++    OWPSlot slots[3] = {
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(0) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .flags = TWP_SLOT_FLAG_CYCLE_TO,
++            .literal = { .offset = OWPULongToNum64(5) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(10) }
++        },
++    };
++    OWPTestSpec tspec = {
++        .npackets = 10,
++        .slots = (OWPSlot *)&slots,
++        .nslots = ARRAY_SIZE(slots),
++    };
++
++    CONTEXT_FOR_TEST_CASE(ctx);
++
++    sctx = run_base_schedule_test(ctx, &tspec);
++    ck_assert_uint_eq(sctx->cycle_to_slot, 1);
++    VERIFY_GENERATOR_AGAINST_SLOTS(sctx, &tspec, 1);
++
++    // We should get the same results after a reset
++    OWPScheduleContextReset(sctx, SID, &tspec);
++    VERIFY_GENERATOR_AGAINST_SLOTS(sctx, &tspec, 1);
++
++    OWPScheduleContextFree(sctx);
++    OWPContextFree(ctx);
++}
++END_TEST
++
++START_TEST(test_GenerateNextDelta_cycle_to_last)
++{
++    OWPContext ctx;
++    OWPScheduleContext sctx;
++    OWPSlot slots[3] = {
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(0) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(5) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .flags = TWP_SLOT_FLAG_CYCLE_TO,
++            .literal = { .offset = OWPULongToNum64(10) }
++        },
++    };
++    OWPTestSpec tspec = {
++        .npackets = 10,
++        .slots = (OWPSlot *)&slots,
++        .nslots = ARRAY_SIZE(slots),
++    };
++
++    CONTEXT_FOR_TEST_CASE(ctx);
++
++    sctx = run_base_schedule_test(ctx, &tspec);
++    ck_assert_uint_eq(sctx->cycle_to_slot, 2);
++    VERIFY_GENERATOR_AGAINST_SLOTS(sctx, &tspec, 2);
++
++    // We should get the same results after a reset
++    OWPScheduleContextReset(sctx, SID, &tspec);
++    VERIFY_GENERATOR_AGAINST_SLOTS(sctx, &tspec, 2);
++
++    OWPScheduleContextFree(sctx);
++    OWPContextFree(ctx);
++}
++END_TEST
++
++START_TEST(test_ContextCreate_cycle_to_invalid)
++{
++    OWPContext ctx;
++    OWPScheduleContext sctx;
++    OWPSlot slots[3] = {
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(0) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .flags = TWP_SLOT_FLAG_CYCLE_TO,
++            .literal = { .offset = OWPULongToNum64(5) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .flags = TWP_SLOT_FLAG_CYCLE_TO,
++            .literal = { .offset = OWPULongToNum64(10) }
++        },
++    };
++    OWPTestSpec tspec = {
++        .npackets = 10,
++        .slots = (OWPSlot *)&slots,
++        .nslots = ARRAY_SIZE(slots),
++    };
++
++    CONTEXT_FOR_TEST_CASE(ctx);
++
++    sctx = OWPScheduleContextCreate(ctx, SID, &tspec);
++    ck_assert_ptr_eq(sctx, NULL);
++
++    OWPContextFree(ctx);
++}
++END_TEST
++
+ Suite *scheduleTestSuite(void)
+ {
+     Suite *suite;
+@@ -185,6 +301,9 @@ Suite *scheduleTestSuite(void)
+     tcase_add_test(tests, test_GenerateNextDelta_single_slot);
+     tcase_add_test(tests, test_GenerateNextDelta_multi_slot);
+     tcase_add_test(tests, test_GenerateNextDelta_overrun);
++    tcase_add_test(tests, test_GenerateNextDelta_cycle_to);
++    tcase_add_test(tests, test_GenerateNextDelta_cycle_to_last);
++    tcase_add_test(tests, test_ContextCreate_cycle_to_invalid);
+     suite_add_tcase(suite, tests);
+ 
+     return suite;
