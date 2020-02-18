@@ -1,0 +1,105 @@
+From: Duncan Eastoe <duncan.eastoe@att.com>
+Date: Fri, 10 Jan 2020 17:26:51 +0000
+Subject: twping: Add support for "cycle to" schedules
+
+A "cycle to" schedule is one where we do not cycle to the first slot
+once we reach the final slot. Instead we cycle to a slot specified by
+the user in the schedule definition.
+
+A "cycle to" schedule is specified by delimiting a slot with a
+semicolon rather than comma. The slots before the semicolon are used
+only once on the first pass through the schedule. The remaining slots
+are used cyclically throughout the remainder of the test.
+
+For example, the schedule "-i 0f,1f;2f" will send the first packet as
+soon as the session starts, the second packet after 1 second, and all
+remaining packets every 2 seconds thereafter.
+
+These schedules are useful when we want to specify no delay for the
+first packet in a test, or perhaps to specify a slower packet rate
+at the start of the test which then ramps up as the test progresses.
+
+owping does not accept a non-cyclic schedule and will exit with an
+error if one is provided.
+---
+ owping/owping.c | 44 ++++++++++++++++++++++++++++++++++----------
+ 1 file changed, 34 insertions(+), 10 deletions(-)
+
+diff --git a/owping/owping.c b/owping/owping.c
+index e9b7400..b3679e8 100644
+--- a/owping/owping.c
++++ b/owping/owping.c
+@@ -992,6 +992,23 @@ FAILED:
+     return False;
+ }
+ 
++static uint32_t
++count_slots(
++        char *sched
++        )
++{
++    char *tstr;
++    uint32_t nslots = 1;
++
++    tstr=sched;
++    while((tstr=strchr(tstr,','))){
++        nslots++;
++        tstr++;
++    }
++
++    return nslots;
++}
++
+ /*
+  * TODO: Find real max padding sizes based upon size of headers
+  */
+@@ -1000,25 +1017,28 @@ FAILED:
+ static OWPBoolean
+ parse_slots(
+         char        *sched,
+-        OWPSlot        **slots_ret,
++        OWPSlot     **slots_ret,
+         uint32_t    *nslots_ret
+         )
+ {
+-    uint32_t    i,nslots;
++    uint32_t    i,nslots=0,cycle_to_slot=0;
+     char        *tstr;
+-    OWPSlot        *slots = NULL;
++    OWPSlot     *slots = NULL;
+ 
+     if(!sched) return False;
+ 
+-    /*
+-     * count number of slots specified.
+-     */
+-    nslots=1;
+-    tstr=sched;
+-    while((tstr=strchr(tstr,','))){
+-        nslots++;
++#ifdef TWAMP
++    if((tstr=strchr(sched,';'))){
++        *tstr = '\0';
++        nslots = cycle_to_slot = count_slots(sched);
++        *tstr = ',';
+         tstr++;
+     }
++    else
++#endif
++        tstr = sched;
++
++    nslots += count_slots(tstr);
+ 
+     /*
+      * Allocate slot array.
+@@ -1079,6 +1099,10 @@ parse_slots(
+         goto FAILED;
+     }
+ 
++#ifdef TWAMP
++    slots[cycle_to_slot].flags |= TWP_SLOT_FLAG_CYCLE_TO;
++#endif
++
+     *slots_ret = slots;
+     *nslots_ret = nslots;
+     return True;

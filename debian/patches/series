@@ -26,3 +26,4 @@ vyatta/twping-allow-more-immediate-start-time.patch
 vyatta/add-check-ut.patch
 vyatta/twamp-schedule-slot-flags.patch
 vyatta/twamp-cycle-to-scheduling.patch
+vyatta/twping-cycle-to-schedule.patch
