@@ -24,3 +24,4 @@ vyatta/twamp-dont-compute-error-on-lost-packets.patch
 vyatta/dont-log-compile-date.patch
 vyatta/twping-allow-more-immediate-start-time.patch
 vyatta/add-check-ut.patch
+vyatta/twamp-schedule-slot-flags.patch

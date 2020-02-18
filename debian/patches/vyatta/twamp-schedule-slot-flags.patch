@@ -1,0 +1,381 @@
+From: Duncan Eastoe <duncan.eastoe@att.com>
+Date: Fri, 10 Jan 2020 18:42:32 +0000
+Subject: schedule: Add support for slot flags
+
+Today the send scheduling behaviour for TWAMP sessions mirrors that
+for OWAMP sessions. OWAMP scheduling is defined by the protocol since
+both ends need to be aware of the schedule. However, for TWAMP the
+reflector does not need to know anything about the send schedule of
+the sender, therefore we are free to implement alternative scheduling
+behaviour.
+
+Therefore this commit adds support for "slot flags" which can be used
+to alter the scheduling behaviour for TWAMP sessions.
+
+No new behaviour/flags are defined in this commit, we are simply
+adding support to the library.
+
+To support this OWPSlot gains a flags field to allow flags to be set
+on a per-slot basis. When writing the schedule slots to the data file
+we steal the unused top 4 bits of the slot type field to encode up to
+4 flags for each slot. This is done by _OWPEncodeNonStandardSlot()
+and _OWPDecodeNonStandardSlot() which are used when reading/writing
+the data file.
+---
+ owamp/api.c      |  55 ++++++++++++++-
+ owamp/owamp.h    |  14 ++--
+ test/Makefile.am |   6 +-
+ test/schedule.c  | 203 +++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 268 insertions(+), 10 deletions(-)
+ create mode 100644 test/schedule.c
+
+diff --git a/owamp/api.c b/owamp/api.c
+index bd5c91d..112d1af 100644
+--- a/owamp/api.c
++++ b/owamp/api.c
+@@ -2864,6 +2864,57 @@ OWPWriteDataHeaderNumDataRecs(
+     return True;
+ }
+ 
++/*
++ * Function:        _OWPEncodeNonStandardSlot
++ *
++ * Description:
++ *         This function is used to encode a slot record in a single block
++ *         in the format used for the data file header.
++ *
++ *         Do not use this for protocol operations, use _OWPEncodeSlot instead.
++ */
++OWPErrSeverity
++_OWPEncodeNonStandardSlot(
++        uint32_t   msg[4], /* 1 block 32bit aligned */
++        OWPSlot     *slot
++        )
++{
++    char *buf = (char *)msg;
++
++    OWPErrSeverity ret;
++
++    ret = _OWPEncodeSlot(msg,slot);
++    buf[0] |= (slot->flags & 0xf0);
++
++    return ret;
++}
++/*
++ * Function:        _OWPDecodeNonStandardSlot
++ *
++ * Description:
++ *         This function is used to read a schedule slot from a data file
++ *         into a slot structure.
++ *
++ *         Do not use this for protocol operations, use _OWPDecodeSlot instead.
++ */
++OWPErrSeverity
++_OWPDecodeNonStandardSlot(
++        OWPSlot     *slot,
++        uint32_t   msg[4] /* 1 block 32bit aligned */
++        )
++{
++    char    *buf = (char *)msg;
++    uint8_t slot_flags;
++
++    /*
++     * First check, parse, and clear non-standard slot type.
++     */
++    slot->flags = (uint8_t)buf[0] & 0xf0;
++    buf[0] &= 0x0f;
++
++    return _OWPDecodeSlot(slot,msg);
++}
++
+ /*
+  * Function:    OWPWriteDataHeader
+  *
+@@ -3065,7 +3116,7 @@ OWPWriteDataHeader(
+         /*
+          * Each slot is one block (16 bytes)
+          */
+-        if(_OWPEncodeSlot(msg,&hdr->test_spec.slots[i]) !=
++        if(_OWPEncodeNonStandardSlot(msg,&hdr->test_spec.slots[i]) !=
+                 OWPErrOK){
+             OWPError(ctx,OWPErrFATAL,OWPErrINVALID,
+                     "OWPWriteDataHeader: Invalid slot record");
+@@ -3718,7 +3769,7 @@ OWPReadDataHeaderSlots(
+         /*
+          * Decode slot buffer into slot record.
+          */
+-        if(_OWPDecodeSlot(&slots[i],msg) != OWPErrOK){
++        if(_OWPDecodeNonStandardSlot(&slots[i],msg) != OWPErrOK){
+             OWPError(ctx,OWPErrFATAL,OWPErrUNKNOWN,
+                     "OWPReadDataHeaderSlots: Invalid Slot record");
+             errno = EFTYPE;
+diff --git a/owamp/owamp.h b/owamp/owamp.h
+index 73ef6de..3e9bf0a 100644
+--- a/owamp/owamp.h
++++ b/owamp/owamp.h
+@@ -351,12 +351,10 @@ typedef enum {
+ } OWPSlotType;
+ 
+ typedef struct{
+-    OWPSlotType slot_type;
+     OWPNum64    mean;
+ } OWPSlotRandExp;
+ 
+ typedef struct{
+-    OWPSlotType slot_type;
+     OWPNum64    offset;
+ } OWPSlotLiteral;
+ 
+@@ -369,15 +367,17 @@ typedef struct{
+  * slot type.
+  */
+ typedef struct{
+-    OWPSlotType slot_type;
+     OWPNum64    mean_delay;
+ } OWPSlotAny;
+ 
+-typedef union OWPSlotUnion{
++typedef struct OWPSlotStruct{
+     OWPSlotType     slot_type;
+-    OWPSlotRandExp  rand_exp;
+-    OWPSlotLiteral  literal;
+-    OWPSlotAny      any;
++    uint8_t         flags;
++    union{
++        OWPSlotRandExp  rand_exp;
++        OWPSlotLiteral  literal;
++        OWPSlotAny      any;
++    };
+ } OWPSlot;
+ 
+ typedef struct{
+diff --git a/test/Makefile.am b/test/Makefile.am
+index c4cea36..5caac9f 100644
+--- a/test/Makefile.am
++++ b/test/Makefile.am
+@@ -24,7 +24,7 @@ AM_CFLAGS	= $(OWP_PREFIX_CFLAGS)
+ check_PROGRAMS  = owtvec owstats owping_enc owping_clear owe2e_clear owe2e_auth owe2e_enc twping_enc twping_clear hmac twe2e_clear twe2e_auth twe2e_enc
+ 
+ if HAVE_CHECK
+-    check_PROGRAMS += api
++    check_PROGRAMS += api schedule
+ endif
+ 
+ TESTS           = $(check_PROGRAMS)
+@@ -84,3 +84,7 @@ hmac_DEPENDENCIES = $(OWPLIBDEPS) $(I2UTILLIBDEPS)
+ api_SOURCES = api.c owtest_utils.c
+ api_LDADD = $(OWPLIBS) -lI2util $(CHECK_LIBS)
+ api_CFLAGS = $(AM_CFLAGS) $(CHECK_CFLAGS)
++
++schedule_SOURCES = schedule.c owtest_utils.c
++schedule_LDADD = $(OWPLIBS) -lI2util $(CHECK_LIBS)
++schedule_CFLAGS = $(AM_CFLAGS) $(CHECK_CFLAGS)
+diff --git a/test/schedule.c b/test/schedule.c
+new file mode 100644
+index 0000000..53ba9c2
+--- /dev/null
++++ b/test/schedule.c
+@@ -0,0 +1,203 @@
++#include <check.h>
++#include <stdlib.h>
++
++#include "owamp/owamp.h"
++#include "owamp/schedule.c"
++
++#include "owtest_utils.h"
++
++#define SID "some SID"
++
++/*
++ * Macro to preserve test case name in check output
++ */
++#define VERIFY_GENERATOR_AGAINST_SLOTS(S,T,C)                                   \
++{                                                                               \
++    OWPNum64 ret;                                                               \
++    uint32_t i, slot;                                                           \
++                                                                                \
++    ck_assert_uint_lt((C), (T)->nslots);                                        \
++                                                                                \
++    for (i = slot = 0; i < (T)->npackets; i++, slot++) {                        \
++        if (slot == (T)->nslots)                                                \
++            slot = (C);                                                         \
++                                                                                \
++        ret = OWPScheduleContextGenerateNextDelta((S));                         \
++        ck_assert_double_eq(OWPNum64ToDouble(ret),                              \
++                            OWPNum64ToDouble((T)->slots[slot].literal.offset)); \
++    }                                                                           \
++}
++
++static OWPScheduleContext
++run_base_schedule_test(OWPContext ctx, OWPTestSpec *tspec)
++{
++    OWPScheduleContext sctx;
++
++    sctx = OWPScheduleContextCreate(ctx, SID, tspec);
++    ck_assert_ptr_ne(sctx, NULL);
++
++    ck_assert_ptr_eq(sctx->ctx, ctx);
++    ck_assert_uint_eq(sctx->i, 0);
++    ck_assert_uint_eq(sctx->maxi, tspec->npackets);
++    ck_assert_uint_eq(sctx->nslots, MIN(tspec->nslots, tspec->npackets));
++    ck_assert_ptr_eq(sctx->slots, tspec->slots);
++
++    return sctx;
++}
++
++START_TEST(test_ContextCreate_invalid)
++{
++    OWPContext ctx;
++    OWPScheduleContext sctx;
++    OWPSlot slots[2] = {
++        {
++            .slot_type = 255,
++            .literal = { .offset = OWPULongToNum64(0) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(5) }
++        },
++    };
++    OWPTestSpec tspec = {
++        .npackets = 10,
++        .slots = (OWPSlot *)&slots,
++        .nslots = ARRAY_SIZE(slots),
++    };
++
++    CONTEXT_FOR_TEST_CASE(ctx);
++
++    sctx = OWPScheduleContextCreate(ctx, SID, &tspec);
++    ck_assert_ptr_eq(sctx, NULL);
++
++    OWPContextFree(ctx);
++}
++END_TEST
++
++START_TEST(test_GenerateNextDelta_single_slot)
++{
++    OWPContext ctx;
++    OWPScheduleContext sctx;
++    OWPSlot slots[1] = {
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(1) }
++        },
++    };
++    OWPTestSpec tspec = {
++        .npackets = 10,
++        .slots = (OWPSlot *)&slots,
++        .nslots = ARRAY_SIZE(slots),
++    };
++
++    CONTEXT_FOR_TEST_CASE(ctx);
++
++    sctx = run_base_schedule_test(ctx, &tspec);
++    VERIFY_GENERATOR_AGAINST_SLOTS(sctx, &tspec, 0);
++
++    OWPScheduleContextFree(sctx);
++    OWPContextFree(ctx);
++}
++END_TEST
++
++START_TEST(test_GenerateNextDelta_multi_slot)
++{
++    OWPContext ctx;
++    OWPScheduleContext sctx;
++    OWPSlot slots[2] = {
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(1) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(5) }
++        },
++    };
++    OWPTestSpec tspec = {
++        .npackets = 5,
++        .slots = (OWPSlot *)&slots,
++        .nslots = ARRAY_SIZE(slots),
++    };
++
++    CONTEXT_FOR_TEST_CASE(ctx);
++
++    sctx = run_base_schedule_test(ctx, &tspec);
++    VERIFY_GENERATOR_AGAINST_SLOTS(sctx, &tspec, 0);
++
++    // We should get the same results after a reset
++    OWPScheduleContextReset(sctx, SID, &tspec);
++    VERIFY_GENERATOR_AGAINST_SLOTS(sctx, &tspec, 0);
++
++    OWPScheduleContextFree(sctx);
++    OWPContextFree(ctx);
++}
++END_TEST
++
++START_TEST(test_GenerateNextDelta_overrun)
++{
++    OWPContext ctx;
++    OWPScheduleContext sctx;
++    OWPNum64 ret;
++    uint32_t i;
++    OWPSlot slots[2] = {
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(10) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(50) }
++        },
++    };
++    OWPTestSpec tspec = {
++        .npackets = 5,
++        .slots = (OWPSlot *)&slots,
++        .nslots = ARRAY_SIZE(slots),
++    };
++
++    CONTEXT_FOR_TEST_CASE(ctx);
++
++    sctx = run_base_schedule_test(ctx, &tspec);
++    VERIFY_GENERATOR_AGAINST_SLOTS(sctx, &tspec, 0);
++
++    ck_assert_uint_eq(sctx->i, sctx->maxi);
++
++    // Do an overrun beyond maxi
++    for (i = 0; i < 20; i++) {
++        ret = OWPScheduleContextGenerateNextDelta(sctx);
++        ck_assert(ret == OWPErrFATAL);
++    }
++
++    OWPScheduleContextFree(sctx);
++    OWPContextFree(ctx);
++}
++END_TEST
++
++Suite *scheduleTestSuite(void)
++{
++    Suite *suite;
++    TCase *tests;
++
++    suite = suite_create("Schedule API");
++    tests = tcase_create("Tests");
++    tcase_add_test(tests, test_ContextCreate_invalid);
++    tcase_add_test(tests, test_GenerateNextDelta_single_slot);
++    tcase_add_test(tests, test_GenerateNextDelta_multi_slot);
++    tcase_add_test(tests, test_GenerateNextDelta_overrun);
++    suite_add_tcase(suite, tests);
++
++    return suite;
++}
++
++int main(int argc, char **argv)
++{
++    Suite   *suite;
++    SRunner *suite_runner;
++
++    suite = scheduleTestSuite();
++    suite_runner = srunner_create(suite);
++
++    srunner_run_all(suite_runner, CK_NORMAL);
++    return srunner_ntests_failed(suite_runner) ? EXIT_FAILURE : EXIT_SUCCESS;
++}
