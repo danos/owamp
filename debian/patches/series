@@ -27,3 +27,4 @@ vyatta/add-check-ut.patch
 vyatta/twamp-schedule-slot-flags.patch
 vyatta/twamp-cycle-to-scheduling.patch
 vyatta/twping-cycle-to-schedule.patch
+vyatta/twping-end-delay.patch

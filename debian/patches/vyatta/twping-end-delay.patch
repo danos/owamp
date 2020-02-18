@@ -1,0 +1,96 @@
+From: Duncan Eastoe <duncan.eastoe@att.com>
+Date: Tue, 18 Feb 2020 19:05:38 +0000
+Subject: twping: implement test end delay
+
+twping currently exposes a test end delay option (-E) but it does
+not currently have any effect. This commit adds support for the
+end delay, with the following semantics:
+
+When configured, the end delay determines the period to wait before
+sending the Stop-Sessions message once all test packets, which have
+not already been marked as lost, have been replied to. The delay will
+not come into effect until we have attempted to send all test packets
+for the session.
+
+When the end delay is not configured, or prior to this commit, we
+would wait for the loss timeout period to expire before terminating
+the session.
+
+This allows twping to be configured to end successful tests more
+quickly when we do not care for duplicate statistics, while still
+having a reasonably long loss threshold value.
+
+In other words, when an end delay is specified it takes over from
+the loss threshold timeout when all test packets have been received.
+---
+ owamp/endpoint.c | 28 ++++++++++++++++++++++++++--
+ owping/owping.c  |  5 +++++
+ 2 files changed, 31 insertions(+), 2 deletions(-)
+
+diff --git a/owamp/endpoint.c b/owamp/endpoint.c
+index c8a031c..77c347b 100644
+--- a/owamp/endpoint.c
++++ b/owamp/endpoint.c
+@@ -3074,6 +3074,7 @@ run_tw_test(
+     struct timespec currtime;
+     struct timespec nexttime;
+     struct timespec timeout;
++    struct timespec *recv_timeout;
+     struct timespec latetime;
+     struct timespec sleeptime;
+     struct itimerval wake;
+@@ -3458,12 +3459,35 @@ RECEIVE:
+                 goto finish_sender;
+             }
+ 
++            /*
++             * Trigger the end delay, rather than loss timeout, if we have
++             * received a response to all test packets we intended to send.
++             */
++            recv_timeout = &timeout;
++            if(OWPContextConfigGetV(ep->cntrl->ctx, OWPEndDelay) &&
++               node->seq == ep->tsession->test_spec.npackets - 1 &&
++               node->hit){
++                OWPLostPacket n;
++
++                for(n = ep->begin; n; n = n->next)
++                    if(!n->hit)
++                        break;
++
++                /* Reached the last node? */
++                if(!n){
++                    if(timespecisset(&ep->enddelay))
++                        recv_timeout = &ep->enddelay;
++                    else
++                        goto SKIP_SEND;
++                }
++            }
++
+             /*
+              * Set the timer.
+              */
+             tvalclear(&wake.it_interval);
+-            wake.it_value.tv_sec = timeout.tv_sec;
+-            wake.it_value.tv_usec = timeout.tv_nsec / 1000;
++            wake.it_value.tv_sec = recv_timeout->tv_sec;
++            wake.it_value.tv_usec = recv_timeout->tv_nsec / 1000;
+ 
+             /* How long do we have till the next send? */
+             if(i < ep->tsession->test_spec.npackets - 1){
+diff --git a/owping/owping.c b/owping/owping.c
+index b3679e8..a91057e 100644
+--- a/owping/owping.c
++++ b/owping/owping.c
+@@ -2243,7 +2243,12 @@ main(
+             /*
+              * Now wait lossThreshold for duplicate packet detection.
+              */
++#ifdef TWAMP
++            duration += MAX(ping_ctx.opt.lossThreshold,
++                            ping_ctx.opt.endDelay);
++#else
+             duration += ping_ctx.opt.lossThreshold;
++#endif
+ 
+             /*
+              * Now wait for StopSessions messages to be exchanged.
