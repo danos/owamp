@@ -12,7 +12,7 @@ Copyright: 2014-2018 perfSONAR project
 License: Apache-2.0
 
 Files: debian/patches/vyatta/*
-Copyright: 2017-2019 AT&T Intellectual Property
+Copyright: 2017-2020 AT&T Intellectual Property
            2014-2017 Brocade Communications Systems Inc.
 License: Apache-2.0
 

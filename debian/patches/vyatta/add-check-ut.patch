@@ -1,0 +1,227 @@
+From: Duncan Eastoe <duncan.eastoe@att.com>
+Date: Fri, 14 Feb 2020 19:24:20 +0000
+Subject: test: Add basic check based UTs
+
+Add infra for defining unit tests using the check framework and add
+some initial tests for packet rate calculations.
+---
+ configure.ac        |   3 ++
+ test/Makefile.am    |   9 ++++
+ test/api.c          | 127 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ test/owtest_utils.h |  32 +++++++++++++
+ 4 files changed, 171 insertions(+)
+ create mode 100644 test/api.c
+
+diff --git a/configure.ac b/configure.ac
+index ca25015..b1c7937 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -213,6 +213,9 @@ if test -n "${MAN2HTML}"; then
+ fi
+ AM_CONDITIONAL([HAVE_MAN2HTML], test x$do_man2html = xtrue)
+ 
++PKG_CHECK_MODULES([CHECK], [check], [have_check=true], [have_check=false])
++AM_CONDITIONAL([HAVE_CHECK], [test x$have_check = xtrue])
++
+ AC_SUBST(TOP_BUILD_DIRS)
+ 
+ AC_SUBST(ac_aux_dir)
+diff --git a/test/Makefile.am b/test/Makefile.am
+index 0713c5f..c4cea36 100644
+--- a/test/Makefile.am
++++ b/test/Makefile.am
+@@ -22,6 +22,11 @@ INCLUDES	= $(OWPINCS) $(I2UTILINCS)
+ AM_CFLAGS	= $(OWP_PREFIX_CFLAGS)
+ 
+ check_PROGRAMS  = owtvec owstats owping_enc owping_clear owe2e_clear owe2e_auth owe2e_enc twping_enc twping_clear hmac twe2e_clear twe2e_auth twe2e_enc
++
++if HAVE_CHECK
++    check_PROGRAMS += api
++endif
++
+ TESTS           = $(check_PROGRAMS)
+ 
+ owtvec_SOURCES	= owtvec.c
+@@ -75,3 +80,7 @@ twe2e_enc_DEPENDENCIES = $(OWPLIBDEPS) $(I2UTILLIBDEPS)
+ hmac_SOURCES   = hmac.c
+ hmac_LDADD = $(OWPLIBS) -lI2util $(MALLOCDEBUGLIBS) -lcrypto
+ hmac_DEPENDENCIES = $(OWPLIBDEPS) $(I2UTILLIBDEPS)
++
++api_SOURCES = api.c owtest_utils.c
++api_LDADD = $(OWPLIBS) -lI2util $(CHECK_LIBS)
++api_CFLAGS = $(AM_CFLAGS) $(CHECK_CFLAGS)
+diff --git a/test/api.c b/test/api.c
+new file mode 100644
+index 0000000..0ada927
+--- /dev/null
++++ b/test/api.c
+@@ -0,0 +1,127 @@
++#include <check.h>
++#include <stdlib.h>
++
++#include "owamp/owamp.h"
++
++#include "owtest_utils.h"
++
++START_TEST(test_OWPTestPacketRate_invalid_args)
++{
++    OWPContext ctx;
++    double ret;
++    OWPTestSpec tspec = {0};
++
++    CONTEXT_FOR_TEST_CASE(ctx);
++
++    ret = OWPTestPacketRate(ctx, NULL);
++    ck_assert(ret == 0);
++
++    ret = OWPTestPacketRate(ctx, &tspec);
++    ck_assert(ret == 0);
++
++    OWPContextFree(ctx);
++}
++END_TEST
++
++START_TEST(test_OWPTestPacketRate_simple)
++{
++    OWPContext ctx;
++    double ret;
++    int i;
++    OWPSlot slots[1] = {
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(1) }
++        },
++    };
++    OWPTestSpec tspec = {
++        .npackets = 50,
++        .slots = (OWPSlot *)&slots,
++        .nslots = ARRAY_SIZE(slots),
++    };
++
++    CONTEXT_FOR_TEST_CASE(ctx);
++
++    ret = OWPTestPacketRate(ctx, &tspec);
++    ck_assert_double_eq(ret, 1.0);
++
++    // Retry with npackets 0 - we should get the same results
++    tspec.npackets = 0;
++    ck_assert_double_eq(ret, OWPTestPacketRate(ctx, &tspec));
++
++    OWPContextFree(ctx);
++}
++END_TEST
++
++START_TEST(test_OWPTestPacketRate_unusual)
++{
++    OWPContext ctx;
++    double ret;
++    int i;
++    OWPSlot slots[5] = {
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(2) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(4) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(5) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(10) }
++        },
++        {
++            .slot_type = OWPSlotLiteralType,
++            .literal = { .offset = OWPULongToNum64(15) }
++        },
++    };
++    OWPTestSpec tspec = {
++        .npackets = 13,
++        .slots = (OWPSlot *)&slots,
++        .nslots = ARRAY_SIZE(slots),
++    };
++
++    CONTEXT_FOR_TEST_CASE(ctx);
++
++    ret = OWPTestPacketRate(ctx, &tspec);
++    ck_assert_double_eq_tol(ret, 0.1388, 0.0001);
++
++    // Retry with npackets 0 - we should get the same result
++    tspec.npackets = 0;
++    ck_assert_double_eq(ret, OWPTestPacketRate(ctx, &tspec));
++
++    OWPContextFree(ctx);
++}
++END_TEST
++
++Suite *apiTestSuite(void)
++{
++    Suite *suite;
++    TCase *tests;
++
++    suite = suite_create("API");
++    tests = tcase_create("Tests");
++    tcase_add_test(tests, test_OWPTestPacketRate_invalid_args);
++    tcase_add_test(tests, test_OWPTestPacketRate_simple);
++    tcase_add_test(tests, test_OWPTestPacketRate_unusual);
++    suite_add_tcase(suite, tests);
++
++    return suite;
++}
++
++int main(int argc, char **argv)
++{
++    Suite   *suite;
++    SRunner *suite_runner;
++
++    suite = apiTestSuite();
++    suite_runner = srunner_create(suite);
++
++    srunner_run_all(suite_runner, CK_NORMAL);
++    return srunner_ntests_failed(suite_runner) ? EXIT_FAILURE : EXIT_SUCCESS;
++}
+diff --git a/test/owtest_utils.h b/test/owtest_utils.h
+index 8748e4c..ade3d9f 100644
+--- a/test/owtest_utils.h
++++ b/test/owtest_utils.h
+@@ -24,5 +24,37 @@ struct _server_params {
+ void *run_server(struct _server_params *);
+ 
+ int count_occurrences(const char *haystack, const char *needle);
++
++/*
++ * Helpers for writing tests using the check UT framework
++ */
+  
++#define CONTEXT_FOR_TEST_CASE(V)        \
++{                                       \
++    const char *name[1] = { __func__ }; \
++    V = tmpContext((char **)&name);     \
++    ck_assert_ptr_ne(V, NULL);          \
++}
++
++/*
++ * The below macros were not available until version 0.11.0 of check.
++ * Debian 10 ships version 0.10.0 so we define some equivalents as a
++ * convenience.
++ */
++
++#ifndef ck_assert_double_eq_tol
++#define ck_assert_double_eq_tol(A,B,T)                       \
++{                                                            \
++    ck_assert_msg((A) >= ((B)-(T)) && (A) <= ((B)+(T)),      \
++                  "%f != %f (tolerance %f)", (A), (B), (T)); \
++}
++#endif
++
++#ifndef ck_assert_double_eq
++#define ck_assert_double_eq(A,B)                     \
++{                                                    \
++    ck_assert_msg((A) == (B), "%f != %f", (A), (B)); \
++}
++#endif
+ 
++#define ARRAY_SIZE(A) (sizeof((A))/sizeof((A)[0]))
