@@ -8,7 +8,7 @@ PartOf=twampd.target
 Type=forking
 Restart=on-failure
 PIDFile=/run/twamp-server.pid
-ExecStart=/usr/sbin/twampd -c /etc/twamp-server -R /run
+ExecStart=/usr/sbin/twampd -c /etc/twamp-server -R /run -G adm
 LimitNOFILE=8192
 TasksMax=8193
 
