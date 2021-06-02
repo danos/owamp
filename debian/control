@@ -4,7 +4,13 @@ Priority: optional
 Maintainer: Vyatta Package Maintainers <DL-vyatta-help@att.com>
 Build-Depends: debhelper (>= 9), dh-apparmor, dh-autoreconf, dh-exec, debhelper (>= 9.20160709) | dh-systemd,
  libi2util-dev (>= 4.2.0), libi2util-dev-vyatta, libcap-dev, libssl-dev,
- check, pkg-config
+ check, pkg-config,
+ libvyatta-dataplane-proto-dev (>= 3.13.3),
+ libvyatta-dataplane-proto-c-dev (>= 3.13.3),
+ protobuf-c-compiler,
+ libprotobuf-c-dev,
+ libczmq-dev,
+ libvplaned-dev (>= 3.6.14)
 Standards-Version: 3.9.8
 Homepage: http://software.internet2.edu/owamp/
 Vcs-Git: https://github.com/perfsonar/owamp
@@ -53,7 +59,8 @@ Package: twamp-server
 Architecture: any
 Provides: twamp-server-vyatta
 Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, lsb-base,
- ntp | time-daemon
+ ntp | time-daemon,
+ libvyatta-dataplane-proto-c1 (>= 3.13.3)
 Description: TWAMP daemon
  TWAMP is a client/server package that allows one to measure the
  latency between hosts. Like ping, TWAMP enables you to measure the
