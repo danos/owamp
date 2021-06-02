@@ -1,0 +1,993 @@
+From: Mark Gillott <mgillott@vyatta.att-mail.com>
+Date: Wed, 2 Jun 2021 17:08:09 +0100
+Subject: twamp: add support for dataplane offload
+
+Offload the processing of TWAMP test packets to the vyatta dataplane.
+
+  o propagate session (endpoint) details (local & remote addressing
+    information, mode, packet sizes) down to the dataplane
+
+  o with offload enabled, the main packet processing function
+    (run_reflector()) simply polls the dataplane to ensure frames are
+    being received & returned to the remote client.
+
+  o on termination of the control session, the dataplane session is
+    delete
+---
+ debian/patches/series                         |   1 +
+ .../vyatta/twamp-dataplane-offload.patch      | 969 ++++++++++++++++++
+ 2 files changed, 970 insertions(+)
+
+--- a/owampd/owampd.c
++++ b/owampd/owampd.c
+@@ -46,6 +46,7 @@
+ #include "owampdP.h"
+ #include "policy.h"
+ #include "fts.h"
++#include "vyatta-dataplane.h"
+ 
+ #ifdef TWAMP
+ #define NWAMPD_FILE_PREFIX "twamp-server"
+@@ -186,6 +187,7 @@ WriteTestSessionState(const OWPTestSessi
+     const char          *state;
+     uint32_t            dscp;
+     char                sid_name[sizeof(OWPSID)*2+1];
++    char                *offload;
+ 
+     I2HexEncode(sid_name,test_state->sid,sizeof(OWPSID));
+ 
+@@ -214,11 +216,16 @@ WriteTestSessionState(const OWPTestSessi
+         state = "INACTIVE";
+     }
+ 
++    if (test_state->offload)
++        offload = "offload:1";
++    else
++        offload = "offload:0";
++
+     dscp = (test_state->typeP >> 24) & 0x3f;
+ 
+-    fprintf(state_fp, "%s\t[%s]:%s\t[%s]:%s\t%s\t0x%x\t%d\n", sid_name,
++    fprintf(state_fp, "%s\t[%s]:%s\t[%s]:%s\t%s\t0x%x\t%d\t%s\n", sid_name,
+             localaddrstr, localportstr, remoteaddrstr, remoteportstr, state,
+-            dscp, test_state->endpoint_pid);
++            dscp, test_state->endpoint_pid, offload);
+ 
+     return True;
+ }
+@@ -1463,6 +1470,10 @@ LoadConfig(
+             }
+             opts.testtimeout = tlng;
+         }
++        else if(!strncasecmp(key,"nooffload",
++                             strlen("nooffload"))){
++            opts.offload = False;
++        }
+ #endif
+         else{
+             fprintf(stderr,"Unknown key=%s\n",key);
+@@ -1548,6 +1559,10 @@ int main(
+     opts.maxcontrolsessions = 0;
+     opts.controldscpvalue = 0;
+ 
++#ifdef TWAMP
++    opts.offload = True;
++#endif
++
+     if(!getcwd(opts.cwd,sizeof(opts.cwd))){
+         perror("getcwd()");
+         exit(1);
+@@ -2183,6 +2198,10 @@ int main(
+         }
+     }
+ 
++#ifdef TWAMP
++    vyatta_dataplane_init(&opts, ctx);
++#endif
++
+     while (1) {
+         int     nfound;
+ 
+@@ -2275,6 +2294,10 @@ int main(
+         kill(-mypid,SIGKILL);
+     }
+ 
++#ifdef TWAMP
++    vyatta_dataplane_cleanup(ctx);
++#endif
++
+     I2ErrLog(errhand,"%s: exited.",progname);
+ 
+     exit(0);
+--- a/owampd/owampdP.h
++++ b/owampd/owampdP.h
+@@ -69,6 +69,10 @@ typedef struct {
+ #endif
+     I2Boolean       daemon;
+ 
++#ifdef TWAMP
++    I2Boolean       offload;          /* Dataplane offload permitted? */
++#endif
++
+     I2Boolean       setEndDelay;
+     double          endDelay;
+     char            *runstatedir;
+--- a/owamp/endpoint.c
++++ b/owamp/endpoint.c
+@@ -35,6 +35,8 @@
+ #include <sys/wait.h>
+ #include <sys/stat.h>
+ 
++#include "owamp/vyatta-endpoint.h"
++
+ /*
+  * Some systems (Solaris ahem...) don't define the CMSG_SPACE macro.
+  * It does define related macros - I will attempt to do the "right thing".
+@@ -2701,6 +2703,9 @@ run_reflector(
+ 
+     i = 0;
+ 
++    struct offload_session_counters last = {0};
++    struct offload_session_counters curr, delta;
++
+     while(1){
+         struct sockaddr_storage peer_addr;
+         socklen_t               peer_addr_len;
+@@ -2720,6 +2725,25 @@ again:
+             goto error;
+         }
+ 
++        while(ep->offload) {
++            sleep(testtimeout/2);
++
++            if (owp_int | owp_alrm)
++                goto error;
++
++            if (owp_usr2)
++                goto test_over;
++
++            if (vyatta_endpoint_session_counters(ep, &curr) < 0)
++                goto error;
++
++            delta.tx_pkts = curr.tx_pkts - last.tx_pkts;
++            delta.rx_pkts = curr.rx_pkts - last.rx_pkts;
++            last = curr;
++            if (delta.tx_pkts > 0)
++                goto again;
++        }
++
+         if(owp_int){
+             goto error;
+         }
+@@ -3026,10 +3050,12 @@ RETRY:
+     }
+ 
+ test_over:
++    vyatta_endpoint_session_end(ep);
+ 
+     exit(OWP_CNTRL_ACCEPT);
+ 
+ error:
++    vyatta_endpoint_session_end(ep);
+ 
+     if (owp_alrm) {
+         OWPError(ep->cntrl->ctx,OWPErrINFO,OWPErrUNKNOWN,
+--- a/configure.ac
++++ b/configure.ac
+@@ -214,9 +214,24 @@ fi
+ AM_CONDITIONAL([HAVE_MAN2HTML], test x$do_man2html = xtrue)
+ 
+ PKG_CHECK_MODULES([CHECK], [check], [have_check=true], [have_check=false])
++
++PKG_CHECK_MODULES(JSON_C, [json-c])
++PKG_CHECK_MODULES(LIBCZMQ, [libczmq >= 3.0.2])
++PKG_CHECK_MODULES(LIBZMQ, [libzmq >= 4.0.4])
++PKG_CHECK_MODULES([PROTOBUF_C], [libprotobuf-c >= 1.0.0])
++AC_ARG_VAR([PROTOC_C], [protobuf compiler command])
++AC_PATH_PROG([PROTOC_C], [protoc-c], [],
++                         [`$PKG_CONFIG --variable=exec_prefix libprotobuf-c`/bin:$PATH])
++if test -z "$PROTOC_C"; then
++   AC_MSG_ERROR([Could not find protoc-c])
++fi
++
+ AM_CONDITIONAL([HAVE_CHECK], [test x$have_check = xtrue])
+ 
+ AC_SUBST(TOP_BUILD_DIRS)
++AC_SUBST(PROTOBUF_LIBS)
++AC_SUBST(PROTOBUF_CFLAGS)
++AC_SUBST(PROTOBUF_VERSION)
+ 
+ AC_SUBST(ac_aux_dir)
+ AC_OUTPUT([Makefile owamp/Makefile owampd/Makefile owping/Makefile powstream/Makefile conf/Makefile test/Makefile doc/Makefile selinux/Makefile owamp.spec])
+--- a/owampd/Makefile.am
++++ b/owampd/Makefile.am
+@@ -28,6 +28,10 @@ owampd_SOURCES	= owampdP.h owampd.c poli
+ owampd_LDADD	= $(OWPLIBS) $(MALLOCDEBUGLIBS) -lI2util
+ owampd_DEPENDENCIES = $(OWPLIBDEPS) $(I2UTILLIBDEPS)
+ 
+-twampd_SOURCES	= owampdP.h twampd.c policy.h policy.c
++PKGLIST		= vyatta-dataplane-proto-c libvplaned libczmq libzmq
++
++twampd_SOURCES	= owampdP.h twampd.c policy.h policy.c vyatta-dataplane.c
++twampd_CFLAGS   = $(shell pkg-config --cflags $(PKGLIST))
++twampd_LDFLAGS  = $(shell pkg-config --libs $(PKGLIST))
+ twampd_LDADD	= $(owampd_LDADD)
+ twampd_DEPENDENCIES = $(owampd_DEPENDENCIES)
+--- /dev/null
++++ b/owampd/vyatta-dataplane.c
+@@ -0,0 +1,645 @@
++/*-
++ * Copyright (c) 2021, AT&T Intellectual Property.  All rights reserved.
++ * All rights reserved.
++ *
++ * SPDX-License-Identifier: LGPL-2.1-only
++ */
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <stddef.h>
++#include <stdio.h>
++#include <sys/socket.h>
++#include <netdb.h>
++
++#include <czmq.h>
++
++#define TWAMP
++
++#include <owamp/owampP.h>
++#include <owamp/owamp.h>
++#include "owampdP.h"
++
++#include <owamp/vyatta-endpoint.h>
++#include "vyatta-dataplane.h"
++#include "DataplaneEnvelope.pb-c.h"
++#include "TwampResponder.pb-c.h"
++#include "vplaned.h"
++
++#define DATAPLANE_TWAMP_TIMEOUT 5*1000
++
++struct offload_ops *dataplane_offload_ops = NULL;
++static char *dataplane_console_url;
++static char *twamp_vrf_name;
++
++struct dataplane_twamp_ipaddr {
++	IPAddress pbaddr;
++	struct sockaddr *saddr;
++	socklen_t saddrlen;
++	uint8_t ip6data[16];
++};
++
++static void
++dataplane_console_close(zsock_t **s)
++{
++	zsock_destroy(s);
++}
++
++static zsock_t *
++dataplane_console_open(OWPContext ctx)
++{
++	const char *endpoint = dataplane_console_url;
++	zsock_t *s;
++
++	if (endpoint == NULL)
++		return NULL;
++
++	if (strncmp(dataplane_console_url, "ipc://", sizeof("ipc://")-1) == 0) {
++		const char *path = endpoint + 6;
++
++		if (access(path, W_OK|R_OK) < 0) {
++			OWPError(ctx, OWPErrWARNING, errno,
++				 "dataplane: no access to console (%s)",
++				 endpoint);
++			return NULL;
++		}
++	}
++
++	zsys_set_ipv6(1);
++	s = zsock_new_req(endpoint);
++	if (s == NULL) {
++		OWPError(ctx, OWPErrWARNING, OWPErrUNKNOWN,
++			 "dataplane: failed to connect to console (%s)",
++			 endpoint);
++	}
++
++	return s;
++}
++
++static bool
++dataplane_send_str(OWPContext ctx, zsock_t *s, const char *cmd)
++{
++	bool status = false;
++
++	if (zsock_send(s, "s", cmd) < 0) {
++		OWPError(ctx, OWPErrFATAL, OWPErrUNKNOWN,
++			 "dataplane (%s): send failed", cmd);
++		return status;
++	}
++
++	zsock_set_rcvtimeo(s, DATAPLANE_TWAMP_TIMEOUT);
++
++	zmsg_t *resp = zmsg_recv(s);
++	if (resp == NULL) {
++		OWPError(ctx, OWPErrFATAL, OWPErrUNKNOWN,
++			 "dataplane (%s): no response", cmd);
++		return status;
++	}
++
++	char *ok = zmsg_popstr(resp);
++	if (ok == NULL) {
++		OWPError(ctx, OWPErrFATAL, OWPErrUNKNOWN,
++			 "dataplane (%s): missing reply", cmd);
++		goto failed;
++	}
++
++	if (strncmp(ok, "OK", 2) != 0) {
++		OWPError(ctx, OWPErrFATAL, OWPErrUNKNOWN,
++			 "dataplane (%s): error reply: %s", cmd, ok);
++		goto failed;
++	}
++
++	status = true;
++failed:
++	free(ok);
++	zmsg_destroy(&resp);
++	return status;
++}
++
++static TWAMPCmdResponse *
++dataplane_send_pb(OWPContext ctx, zsock_t *s, const char *pbname, void *pbmsg,
++		  size_t pbmsglen)
++{
++	DataplaneEnvelope *dpresp = NULL;
++	TWAMPCmdResponse *twresp = NULL;
++	void *buf = NULL;
++	size_t buflen = 0;
++
++	if (zsock_send(s, "sb", "protobuf", pbmsg, pbmsglen) < 0) {
++		OWPError(ctx, OWPErrFATAL, OWPErrUNKNOWN,
++			 "dataplane (%s): send failed", pbname);
++		return NULL;
++	}
++
++	zsock_set_rcvtimeo(s, DATAPLANE_TWAMP_TIMEOUT);
++
++	if (zsock_recv(s, "b", &buf, &buflen) < 0) {
++		OWPError(ctx, OWPErrFATAL, OWPErrUNKNOWN,
++			 "dataplane (%s): no response", pbname);
++		return NULL;
++	}
++
++	dpresp = dataplane_envelope__unpack(NULL, buflen, buf);
++	if (dpresp == NULL) {
++		OWPError(ctx, OWPErrFATAL, OWPErrUNKNOWN,
++			 "dataplane (%s): cannot unpack DP envelope", pbname);
++		goto failed;
++	}
++
++	twresp = twampcmd_response__unpack(NULL, dpresp->msg.len,
++					   dpresp->msg.data);
++	if (twresp == NULL) {
++		OWPError(ctx, OWPErrFATAL, OWPErrUNKNOWN,
++			 "dataplane (%s): cannot unpack TWAMP response", pbname);
++		goto failed;
++	}
++
++failed:
++	dataplane_envelope__free_unpacked(dpresp, NULL);
++	free(buf);
++	return twresp;
++}
++
++static int
++dataplane_pb_set_ipaddr(struct dataplane_twamp_ipaddr *ipaddr,
++			IPAddress *pbaddr, uint32_t *pbport)
++{
++	ipaddress__init(pbaddr);
++	if (ipaddr->saddr->sa_family == AF_INET) {
++		struct sockaddr_in *s = (struct sockaddr_in *)ipaddr->saddr;
++
++		pbaddr->address_oneof_case =
++			IPADDRESS__ADDRESS_ONEOF_IPV4_ADDR;
++		pbaddr->ipv4_addr = s->sin_addr.s_addr;
++		*pbport = ntohs(s->sin_port);
++		return 0;
++	}
++
++	if (ipaddr->saddr->sa_family == AF_INET6) {
++		struct sockaddr_in6 *s = (struct sockaddr_in6 *)ipaddr->saddr;
++
++		pbaddr->address_oneof_case =
++			IPADDRESS__ADDRESS_ONEOF_IPV6_ADDR;
++
++		pbaddr->ipv6_addr.data = &ipaddr->ip6data[0];
++		memcpy(pbaddr->ipv6_addr.data,
++		       &s->sin6_addr.s6_addr,
++		       sizeof(s->sin6_addr.s6_addr));
++		pbaddr->ipv6_addr.len = sizeof(s->sin6_addr.s6_addr);
++		*pbport = ntohs(s->sin6_port);
++		return 0;
++	}
++
++	return -1;
++}
++
++static void
++dataplane_pb_build_key(struct dataplane_twamp_ipaddr *laddr,
++			  struct dataplane_twamp_ipaddr *raddr,
++			  TWAMPSessionKey *key)
++{
++	twampsession_key__init(key);
++	key->laddr = &laddr->pbaddr;
++	dataplane_pb_set_ipaddr(laddr, key->laddr, &key->lport);
++	key->has_lport = true;
++	key->raddr = &raddr->pbaddr;
++	dataplane_pb_set_ipaddr(raddr, key->raddr, &key->rport);
++	key->has_rport = true;
++	key->vrf_name = twamp_vrf_name;
++}
++
++static void *
++dataplane_pb_build_cmd(TWAMPCmd__MtypeCase type, void *msg, size_t *retlen)
++{
++	DataplaneEnvelope envelope = DATAPLANE_ENVELOPE__INIT;
++	TWAMPCmd cmd = TWAMPCMD__INIT;
++	size_t len, packed_len;
++	void *buf1, *buf2;
++
++	cmd.mtype_case = type;
++	switch (type) {
++	case TWAMPCMD__MTYPE_TW_INIT:
++		cmd.tw_init = msg;
++		break;
++	case TWAMPCMD__MTYPE_TWS_DELETE:
++		cmd.tws_delete = msg;
++		break;
++	case TWAMPCMD__MTYPE_TWS_CREATE:
++		cmd.tws_create = msg;
++		break;
++	case TWAMPCMD__MTYPE_TWS_COUNTERS:
++		cmd.tws_counters = msg;
++		break;
++	default:
++		assert(false);
++		break;
++	}
++
++	len = twampcmd__get_packed_size(&cmd);
++	buf1 = malloc(len);
++	assert(buf1 != NULL);
++	packed_len = twampcmd__pack(&cmd, buf1);
++	assert(len == packed_len);
++
++	envelope.type = strdup("vyatta:twamp");
++	assert(envelope.type != NULL);
++	envelope.msg.data = buf1;
++	envelope.msg.len = packed_len;
++	len = dataplane_envelope__get_packed_size(&envelope);
++	buf2 = malloc(len);
++	assert(buf2 != NULL);
++	packed_len = dataplane_envelope__pack(&envelope, buf2);
++	assert(len == packed_len);
++
++	free(envelope.type);
++	free(buf1);
++
++	*retlen = packed_len;
++	return buf2;
++}
++
++static int
++dataplane_session_extract_endpoint (OWPEndpoint ep, const char *action,
++				    struct dataplane_twamp_ipaddr *laddr,
++				    struct dataplane_twamp_ipaddr *raddr)
++{
++	char localaddrstr[NI_MAXHOST];
++	char localportstr[NI_MAXSERV];
++	char remoteaddrstr[NI_MAXHOST];
++	char remoteportstr[NI_MAXSERV];
++	int nierr;
++
++	laddr->saddr = I2AddrSAddr(ep->localaddr, &laddr->saddrlen);
++	if (laddr->saddr == NULL)
++		return -1;
++
++	raddr->saddr = I2AddrSAddr(ep->remoteaddr, &raddr->saddrlen);
++	if (raddr->saddr == NULL)
++		return -1;
++
++	nierr = getnameinfo(laddr->saddr, laddr->saddrlen,
++			    localaddrstr, sizeof(localaddrstr),
++			    localportstr, sizeof(localportstr),
++			    NI_NUMERICSERV | NI_NUMERICHOST);
++	if (nierr != 0) {
++		OWPError(ep->cntrl->ctx, OWPErrDEBUG, OWPErrUNKNOWN,
++			 "%s() getnameinfo(local) failed: %s", __func__,
++			 gai_strerror(nierr));
++		return -1;
++	}
++
++	nierr = getnameinfo(raddr->saddr, raddr->saddrlen,
++			    remoteaddrstr, sizeof(remoteaddrstr),
++			    remoteportstr, sizeof(remoteportstr),
++			    NI_NUMERICSERV | NI_NUMERICHOST);
++	if (nierr != 0) {
++		OWPError(ep->cntrl->ctx, OWPErrDEBUG, OWPErrUNKNOWN,
++			 "%s() getnameinfo(remote) failed: %s", __func__,
++			 gai_strerror(nierr));
++		return -1;
++	}
++
++	OWPError(ep->cntrl->ctx, OWPErrDEBUG, OWPErrUNKNOWN,
++		 "dataplane session %s: local %s:%s remote %s:%s", action,
++		 localaddrstr, localportstr,
++		 remoteaddrstr, remoteportstr);
++	return 0;
++}
++
++static void *
++dataplane_session_request_counters (OWPEndpoint ep, size_t *reqlen)
++{
++	TWAMPSessionDelete counters = TWAMPSESSION_COUNTERS__INIT;
++	TWAMPSessionKey key;
++	struct dataplane_twamp_ipaddr laddr;
++	struct dataplane_twamp_ipaddr raddr;
++
++	*reqlen = 0;
++	if (dataplane_session_extract_endpoint(ep, "counters",
++					       &laddr, &raddr) < 0)
++		return NULL;
++
++	dataplane_pb_build_key(&laddr, &raddr, &key);
++	counters.key = &key;
++	return dataplane_pb_build_cmd(TWAMPCMD__MTYPE_TWS_COUNTERS, &counters,
++				      reqlen);
++}
++
++static void *
++dataplane_session_request_delete (OWPEndpoint ep, size_t *reqlen)
++{
++	TWAMPSessionDelete delete = TWAMPSESSION_DELETE__INIT;
++	TWAMPSessionKey key;
++	struct dataplane_twamp_ipaddr laddr;
++	struct dataplane_twamp_ipaddr raddr;
++
++	*reqlen = 0;
++	if (dataplane_session_extract_endpoint(ep, "delete",
++					       &laddr, &raddr) < 0)
++		return NULL;
++
++	dataplane_pb_build_key(&laddr, &raddr, &key);
++	delete.key = &key;
++	return dataplane_pb_build_cmd(TWAMPCMD__MTYPE_TWS_DELETE, &delete,
++				      reqlen);
++}
++
++static void *
++dataplane_session_request_create (OWPEndpoint ep, size_t *reqlen)
++{
++	TWAMPSessionCreate create = TWAMPSESSION_CREATE__INIT;
++	TWAMPSessionKey key;
++	struct dataplane_twamp_ipaddr laddr;
++	struct dataplane_twamp_ipaddr raddr;
++
++	*reqlen = 0;
++	if (dataplane_session_extract_endpoint(ep, "create",
++					       &laddr, &raddr) < 0)
++		return NULL;
++
++	dataplane_pb_build_key(&laddr, &raddr, &key);
++	create.key = &key;
++	create.has_mode = true;
++	switch(ep->cntrl->mode) {
++	case OWP_MODE_OPEN:
++		create.mode = TWAMPSESSION_CREATE__MODE__MODE_OPEN;
++		break;
++	case OWP_MODE_AUTHENTICATED:
++		create.mode = TWAMPSESSION_CREATE__MODE__MODE_AUTHENTICATED;
++		break;
++	case OWP_MODE_ENCRYPTED:
++		create.mode = TWAMPSESSION_CREATE__MODE__MODE_ENCRYPTED;
++		break;
++	default:
++		OWPError(ep->cntrl->ctx, OWPErrFATAL, EINVAL,
++			 "unknown TWAMP session mode %u", ep->cntrl->mode);
++		return NULL;
++	}
++	create.has_dscp = true;
++	create.dscp = (uint8_t)(ep->tsession->test_spec.typeP >> 24);
++	create.has_rx_payload_len = true;
++	create.rx_payload_len = ep->len_payload;
++	create.has_tx_payload_len = true;
++	create.tx_payload_len = MAX(ep->len_payload, OWPTestTWPayloadSize(
++					    ep->cntrl->mode, 0));
++	if (ep->cntrl->mode != OWP_MODE_OPEN) {
++		create.has_hmac_key = true;
++		create.hmac_key.len = sizeof(ep->hmac_key);
++		create.hmac_key.data = ep->hmac_key;
++		create.has_aes_key = true;
++		create.aes_key.len = sizeof(ep->aesbytes);
++		create.aes_key.data = ep->aesbytes;
++
++		OWPError(ep->cntrl->ctx, OWPErrDEBUG, OWPErrUNKNOWN,
++			 "crypto key size HMAC %u AES %u",
++			 create.hmac_key.len, create.aes_key.len);
++	}
++
++	return dataplane_pb_build_cmd(TWAMPCMD__MTYPE_TWS_CREATE, &create,
++				      reqlen);
++}
++
++static void *
++dataplane_request_init (size_t *reqlen)
++{
++	TWAMPInitialise init = TWAMPINITIALISE__INIT;
++
++	init.vrf_name = twamp_vrf_name;
++	*reqlen = 0;
++	return dataplane_pb_build_cmd(TWAMPCMD__MTYPE_TW_INIT, &init, reqlen);
++}
++
++static int
++dataplane_session_counters(OWPEndpoint ep,
++			   struct offload_session_counters *cntrs)
++{
++	TWAMPCmdResponse *response = NULL;
++	void *request = NULL;
++	size_t reqlen;
++	zsock_t *s;
++	int rc = -1;
++
++	cntrs->tx_pkts = cntrs->rx_pkts = 0;
++
++	request = dataplane_session_request_counters(ep, &reqlen);
++	if (request == NULL) {
++		OWPError(ep->cntrl->ctx, OWPErrFATAL, OWPErrUNKNOWN,
++			 "dataplane: cannot create session counter request");
++		return rc;
++	}
++
++	s = dataplane_console_open(ep->cntrl->ctx);
++	if (s == NULL)
++		goto failed;
++
++	response = dataplane_send_pb(ep->cntrl->ctx, s, "pb-counters", request,
++				     reqlen);
++	if (response != NULL) {
++		TWAMPSessionCounterResponse *counters;
++
++		rc = response->status;
++		counters = response->counters;
++		if (counters != NULL) {
++			if (counters->has_rx_pkts)
++				cntrs->rx_pkts = counters->rx_pkts;
++			if (counters->has_tx_pkts)
++				cntrs->tx_pkts = counters->tx_pkts;
++		}
++	}
++
++	OWPError(ep->cntrl->ctx, OWPErrDEBUG, OWPErrUNKNOWN,
++		 "dataplane session counters: status %d", rc);
++
++failed:
++	twampcmd_response__free_unpacked(response, NULL);
++	dataplane_console_close(&s);
++	free(request);
++	return rc;
++}
++
++static int
++dataplane_session_end(OWPEndpoint ep)
++{
++	TWAMPCmdResponse *response = NULL;
++	void *request = NULL;
++	size_t reqlen;
++	zsock_t *s;
++	int rc = -1;
++
++	request = dataplane_session_request_delete(ep, &reqlen);
++	if (request == NULL) {
++		OWPError(ep->cntrl->ctx, OWPErrFATAL, OWPErrUNKNOWN,
++			 "dataplane: cannot create session stop request");
++		return rc;
++	}
++
++	s = dataplane_console_open(ep->cntrl->ctx);
++	if (s == NULL)
++		goto failed;
++
++	response = dataplane_send_pb(ep->cntrl->ctx, s, "pb-delete", request,
++				     reqlen);
++	if (response != NULL)
++		rc = response->status;
++
++	OWPError(ep->cntrl->ctx, OWPErrDEBUG, OWPErrUNKNOWN,
++		 "dataplane session delete: status %d", rc);
++
++failed:
++	twampcmd_response__free_unpacked(response, NULL);
++	dataplane_console_close(&s);
++	free(request);
++	return rc;
++}
++
++static int
++dataplane_session_start(OWPEndpoint ep)
++{
++	TWAMPCmdResponse *response = NULL;
++	void *request = NULL;
++	size_t reqlen;
++	zsock_t *s;
++	int rc = -1;
++
++	request = dataplane_session_request_create(ep, &reqlen);
++	if (request == NULL) {
++		OWPError(ep->cntrl->ctx, OWPErrFATAL, OWPErrUNKNOWN,
++			 "dataplane: cannot create session start request");
++		return rc;
++	}
++
++	s = dataplane_console_open(ep->cntrl->ctx);
++	if (s == NULL)
++		goto failed;
++
++	response = dataplane_send_pb(ep->cntrl->ctx, s, "pb-create", request,
++				     reqlen);
++	if (response != NULL)
++		rc = response->status;
++
++	OWPError(ep->cntrl->ctx, OWPErrDEBUG, OWPErrUNKNOWN,
++		 "dataplane session create: status %d", rc);
++
++failed:
++	twampcmd_response__free_unpacked(response, NULL);
++	dataplane_console_close(&s);
++	free(request);
++	return rc;
++}
++
++static int
++dataplane_twamp_init(OWPContext ctx)
++{
++	TWAMPCmdResponse *response = NULL;
++	void *request = NULL;
++	size_t reqlen;
++	zsock_t *s;
++	int rc = -1;
++
++	request = dataplane_request_init(&reqlen);
++	if (request == NULL) {
++		OWPError(ctx, OWPErrFATAL, OWPErrUNKNOWN,
++			 "dataplane: cannot create initialisation request");
++		return rc;
++	}
++
++	s = dataplane_console_open(ctx);
++	if (s == NULL)
++		goto failed;
++
++	response = dataplane_send_pb(ctx, s, "pb-initialise", request,
++				     reqlen);
++	if (response != NULL)
++		rc = response->status;
++
++failed:
++	twampcmd_response__free_unpacked(response, NULL);
++	dataplane_console_close(&s);
++	free(request);
++	return rc;
++}
++
++static char *
++dataplane_socket_init(OWPContext ctx)
++{
++	struct vplaned_dataplane *dp = NULL;
++	char *url = NULL;
++	zsock_t *s;
++
++	s = vplaned_connect();
++	if (s == NULL) {
++		OWPError(ctx, OWPErrWARNING, OWPErrINVALID,
++			 "dataplane: vplaned_connect() failed");
++		goto cleanup;
++	}
++
++	if (vplaned_request_dataplane(s) < 0) {
++		OWPError(ctx, OWPErrWARNING, OWPErrINVALID,
++			 "dataplane: vplaned_request_dataplane() failed");
++		goto cleanup;
++	}
++
++	if (vplaned_dp_get_first(s, DATAPLANE_TWAMP_TIMEOUT, false, &dp) <  0) {
++		OWPError(ctx, OWPErrWARNING, OWPErrINVALID,
++			 "dataplane: vplaned_dp_get_first() failed");
++		goto cleanup;
++	}
++
++	if (dp == NULL) {
++		OWPError(ctx, OWPErrWARNING, OWPErrINVALID,
++			 "dataplane: no dataplane available");
++		goto cleanup;
++	}
++
++	url = strdup(vplaned_dp_console(dp));
++cleanup:
++	vplaned_dp_destroy(&dp);
++	vplaned_disconnect(&s);
++	return url;
++}
++
++void vyatta_dataplane_cleanup(OWPContext ctx)
++{
++	dataplane_twamp_init(ctx);
++	free(twamp_vrf_name);
++	free(dataplane_console_url);
++	zsys_shutdown();
++}
++
++static struct offload_ops twamp_offload_ops = {
++	.session_counters = dataplane_session_counters,
++	.session_end = dataplane_session_end,
++	.session_start = dataplane_session_start,
++};
++
++void vyatta_dataplane_init(const owampd_opts *opts, OWPContext ctx)
++{
++	char *consoleurl;
++	char *env;
++	int rc;
++
++	env = getenv("VYATTA_VRF");
++	if (env == NULL)
++		twamp_vrf_name = NULL;
++	else
++		twamp_vrf_name = strdup(env);
++
++	zsys_handler_set(NULL);
++	consoleurl = dataplane_socket_init(ctx);
++	if (consoleurl == NULL)
++		return;
++
++	OWPError(ctx, OWPErrDEBUG, OWPErrINVALID,
++		 "dataplane console URL: %s VRF: %s", consoleurl,
++		 (twamp_vrf_name == NULL) ? "DEFAULT" : twamp_vrf_name);
++	dataplane_console_url = consoleurl;
++	rc = dataplane_twamp_init(ctx);
++	if ((rc == 0) && opts->offload)
++		dataplane_offload_ops = &twamp_offload_ops;
++
++	OWPError(ctx, OWPErrDEBUG, OWPErrUNKNOWN,
++		 "dataplane initialisation: status %d offload %d",
++		 rc, opts->offload);
++
++	zsys_shutdown();
++}
+--- /dev/null
++++ b/owampd/vyatta-dataplane.h
+@@ -0,0 +1,12 @@
++/*-
++ * Copyright (c) 2021, AT&T Intellectual Property.  All rights reserved.
++ * All rights reserved.
++ *
++ * SPDX-License-Identifier: LGPL-2.1-only
++ */
++
++#if !defined(__vyatta_dataplane_h__)
++#define __vyatta_dataplane_h__
++void vyatta_dataplane_cleanup(OWPContext ctx);
++void vyatta_dataplane_init(const owampd_opts *opts, OWPContext ctx);
++#endif
+--- /dev/null
++++ b/owamp/vyatta-endpoint.h
+@@ -0,0 +1,57 @@
++/*-
++ * Copyright (c) 2021, AT&T Intellectual Property.  All rights reserved.
++ * All rights reserved.
++ *
++ * SPDX-License-Identifier: LGPL-2.1-only
++ */
++#if !defined(__vyatta_endpoint_h__)
++#define __vyatta_endpoint_h__
++
++struct offload_session_counters {
++	uint32_t tx_pkts;
++	uint32_t rx_pkts;
++};
++
++struct offload_ops {
++	int (*session_counters)(OWPEndpoint ep,
++				struct offload_session_counters *cntrs);
++	int (*session_end)(OWPEndpoint ep);
++	int (*session_start)(OWPEndpoint ep);
++};
++
++/*
++ * Function table used to "hand off" (offload) test packet processing
++ * to the dataplane. Note that the table is only populated on a TWAMP
++ * daemon (as opposed to the OWAMP daemon which is generated from the
++ * same common code).
++ */
++struct offload_ops *dataplane_offload_ops;
++
++static inline int
++vyatta_endpoint_session_counters(OWPEndpoint ep,
++				 struct offload_session_counters *cntrs)
++{
++	if ((dataplane_offload_ops != NULL) &&
++	    (dataplane_offload_ops->session_counters != NULL))
++		return (dataplane_offload_ops->session_counters)(ep, cntrs);
++	return -EOPNOTSUPP;
++}
++
++static inline int
++vyatta_endpoint_session_end(OWPEndpoint ep)
++{
++	if ((dataplane_offload_ops != NULL) &&
++	    (dataplane_offload_ops->session_end != NULL))
++		return (dataplane_offload_ops->session_end)(ep);
++	return -EOPNOTSUPP;
++}
++
++static inline int
++vyatta_endpoint_session_start(OWPEndpoint ep)
++{
++	if ((dataplane_offload_ops != NULL) &&
++	    (dataplane_offload_ops->session_start != NULL))
++		return (dataplane_offload_ops->session_start)(ep);
++	return -EOPNOTSUPP;
++}
++#endif
+--- a/owamp/api.c
++++ b/owamp/api.c
+@@ -4337,6 +4337,7 @@ OWPControlIterateTestSessions(
+         state.npackets = tptr->test_spec.npackets;
+         state.active = (tptr->endpoint && tptr->endpoint->child > 0);
+         state.endpoint_pid = tptr->endpoint ? tptr->endpoint->child : -1;
++        state.offload = (tptr->endpoint != NULL) ? tptr->endpoint->offload : False;
+ 
+         ret = func(&state, context);
+ 
+--- a/owamp/owamp.h
++++ b/owamp/owamp.h
+@@ -1983,6 +1983,7 @@ typedef struct{
+     uint32_t    packet_size_padding;
+     uint32_t    npackets;
+     OWPBoolean  active;
++    OWPBoolean  offload;
+     pid_t       endpoint_pid;
+ } OWPTestSessionState;
+ 
+--- a/owamp/owampP.h
++++ b/owamp/owampP.h
+@@ -307,6 +307,7 @@ typedef struct OWPEndpointRec{
+     int                 wopts;
+     OWPBoolean          send;
+     OWPBoolean          twoway;
++    OWPBoolean          offload;    /* This session handed off to the dataplane? */
+     int                 sockfd;
+     int                 skiprecfd;
+     off_t               skiprecsize;
+--- a/owamp/sapi.c
++++ b/owamp/sapi.c
+@@ -30,6 +30,7 @@
+ #include <sys/stat.h>
+ #include <fcntl.h>
+ 
++#include "owamp/vyatta-endpoint.h"
+ 
+ static int
+ OpenSocket(
+@@ -892,6 +893,14 @@ OWPProcessTestRequestTW(
+     }
+ 
+     /*
++     * Can we offload processing of the data stream to the dataplane?
++     */
++    if (vyatta_endpoint_session_start(tsession->endpoint) < 0)
++        tsession->endpoint->offload = False;
++    else
++        tsession->endpoint->offload = True;
++
++    /*
+      * Add tsession to list of tests managed by this control connection.
+      */
+     tsession->next = cntrl->tests;
