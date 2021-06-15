@@ -1,3 +1,11 @@
+owamp (4.2.1-1vyatta5) unstable; urgency=medium
+
+  * twamp: run twampd as part of the "adm" group (Fixes: VRVDR-53580)
+  * twamp: add build dependencies for dataplane offload (Fixes: VRVDR-53580)
+  * twamp: add support for dataplane offload (Fixes: VRVDR-53580)
+
+ -- Mark Gillott <mgillott@vyatta-att-mail.com>  Tue, 15 Jun 2021 17:01:22 +0100
+
 owamp (4.2.1-1vyatta4) unstable; urgency=medium
 
   [ Nicholas Brown ]
