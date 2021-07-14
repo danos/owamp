@@ -201,6 +201,15 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
       * call sigprocmask to block signals before the fork.
       * (This ensures no race condition.)
       * First we set the new sig_handler for the child, saving the
+@@ -4233,6 +4281,8 @@ _OWPEndpointStop(
+     int             sig;
+     OWPAcceptType   teststatus=OWP_CNTRL_ACCEPT;
+ 
++    vyatta_endpoint_session_end(ep);
++
+     if((ep->acceptval >= 0) || (ep->child == 0)){
+         *err_ret = OWPErrOK;
+         goto done;
 --- a/configure.ac
 +++ b/configure.ac
 @@ -214,9 +214,24 @@ fi
@@ -244,7 +253,7 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
  twampd_DEPENDENCIES = $(owampd_DEPENDENCIES)
 --- /dev/null
 +++ b/owampd/vyatta-dataplane.c
-@@ -0,0 +1,659 @@
+@@ -0,0 +1,667 @@
 +/*-
 + * Copyright (c) 2021, AT&T Intellectual Property.  All rights reserved.
 + * All rights reserved.
@@ -721,6 +730,13 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
 +	zsock_t *s;
 +	int rc = -1;
 +
++	/*
++	 * The endpoint cleanup up happens on successful completion of
++	 * the test as well as under failure conditions.
++	 */
++	if (!ep->offload)
++		return 0;
++
 +	request = dataplane_session_request_delete(ep, &reqlen);
 +	if (request == NULL) {
 +		OWPError(ep->cntrl->ctx, OWPErrFATAL, OWPErrUNKNOWN,
@@ -746,6 +762,7 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
 +	twampcmd_response__free_unpacked(response, NULL);
 +	dataplane_console_close(&s);
 +	free(request);
++	ep->offload = false;
 +	zsys_shutdown();
 +	return rc;
 +}
