@@ -244,7 +244,7 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
  twampd_DEPENDENCIES = $(owampd_DEPENDENCIES)
 --- /dev/null
 +++ b/owampd/vyatta-dataplane.c
-@@ -0,0 +1,648 @@
+@@ -0,0 +1,659 @@
 +/*-
 + * Copyright (c) 2021, AT&T Intellectual Property.  All rights reserved.
 + * All rights reserved.
@@ -507,6 +507,7 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
 +
 +static int
 +dataplane_session_extract_endpoint (OWPEndpoint ep, const char *action,
++				    bool logsuccess,
 +				    struct dataplane_twamp_ipaddr *laddr,
 +				    struct dataplane_twamp_ipaddr *raddr)
 +{
@@ -546,10 +547,14 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
 +		return -1;
 +	}
 +
-+	OWPError(ep->cntrl->ctx, OWPErrDEBUG, OWPErrUNKNOWN,
-+		 "dataplane session %s: local %s:%s remote %s:%s", action,
-+		 localaddrstr, localportstr,
-+		 remoteaddrstr, remoteportstr);
++	if (logsuccess) {
++		OWPError(ep->cntrl->ctx, OWPErrDEBUG, OWPErrUNKNOWN,
++			 "dataplane session %s: local %s:%s remote %s:%s",
++			 action,
++			 localaddrstr, localportstr,
++			 remoteaddrstr, remoteportstr);
++	}
++
 +	return 0;
 +}
 +
@@ -562,7 +567,7 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
 +	struct dataplane_twamp_ipaddr raddr;
 +
 +	*reqlen = 0;
-+	if (dataplane_session_extract_endpoint(ep, "counters",
++	if (dataplane_session_extract_endpoint(ep, "counters", false,
 +					       &laddr, &raddr) < 0)
 +		return NULL;
 +
@@ -581,7 +586,7 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
 +	struct dataplane_twamp_ipaddr raddr;
 +
 +	*reqlen = 0;
-+	if (dataplane_session_extract_endpoint(ep, "delete",
++	if (dataplane_session_extract_endpoint(ep, "delete", true,
 +					       &laddr, &raddr) < 0)
 +		return NULL;
 +
@@ -600,7 +605,7 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
 +	struct dataplane_twamp_ipaddr raddr;
 +
 +	*reqlen = 0;
-+	if (dataplane_session_extract_endpoint(ep, "create",
++	if (dataplane_session_extract_endpoint(ep, "create", true,
 +					       &laddr, &raddr) < 0)
 +		return NULL;
 +
@@ -694,8 +699,10 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
 +		}
 +	}
 +
-+	OWPError(ep->cntrl->ctx, OWPErrDEBUG, OWPErrUNKNOWN,
-+		 "dataplane session counters: status %d", rc);
++	if (rc < 0) {
++		OWPError(ep->cntrl->ctx, OWPErrDEBUG, OWPErrUNKNOWN,
++			 "dataplane session counters: status %d", rc);
++	}
 +
 +failed:
 +	twampcmd_response__free_unpacked(response, NULL);
@@ -730,8 +737,10 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
 +	if (response != NULL)
 +		rc = response->status;
 +
-+	OWPError(ep->cntrl->ctx, OWPErrDEBUG, OWPErrUNKNOWN,
-+		 "dataplane session delete: status %d", rc);
++	if (rc < 0) {
++		OWPError(ep->cntrl->ctx, OWPErrDEBUG, OWPErrUNKNOWN,
++			 "dataplane session delete: status %d", rc);
++	}
 +
 +failed:
 +	twampcmd_response__free_unpacked(response, NULL);
@@ -766,8 +775,10 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
 +	if (response != NULL)
 +		rc = response->status;
 +
-+	OWPError(ep->cntrl->ctx, OWPErrDEBUG, OWPErrUNKNOWN,
-+		 "dataplane session create: status %d", rc);
++	if (rc < 0) {
++		OWPError(ep->cntrl->ctx, OWPErrDEBUG, OWPErrUNKNOWN,
++			 "dataplane session create: status %d", rc);
++	}
 +
 +failed:
 +	twampcmd_response__free_unpacked(response, NULL);
