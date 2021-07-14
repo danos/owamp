@@ -123,22 +123,32 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
  /*
   * Some systems (Solaris ahem...) don't define the CMSG_SPACE macro.
   * It does define related macros - I will attempt to do the "right thing".
-@@ -2701,6 +2703,9 @@ run_reflector(
+@@ -2701,6 +2703,19 @@ run_reflector(
  
      i = 0;
  
++    /*
++     * Need to ensure the dataplane is making progress (receiving &
++     * replying to test messages). Periodically poll the dataplane for
++     * its packet counters and ensure the reply counter is
++     * incrementing.
++     */
 +    struct offload_session_counters last = {0};
 +    struct offload_session_counters curr, delta;
++    int offload_poll_interval = MIN(5, testtimeout/4);
++
++    if (offload_poll_interval <= 0)
++        offload_poll_interval = 1;
 +
      while(1){
          struct sockaddr_storage peer_addr;
          socklen_t               peer_addr_len;
-@@ -2720,6 +2725,25 @@ again:
+@@ -2720,6 +2735,25 @@ again:
              goto error;
          }
  
 +        while(ep->offload) {
-+            sleep(testtimeout/2);
++            sleep(offload_poll_interval);
 +
 +            if (owp_int | owp_alrm)
 +                goto error;
@@ -159,7 +169,7 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
          if(owp_int){
              goto error;
          }
-@@ -3026,10 +3050,12 @@ RETRY:
+@@ -3026,10 +3060,12 @@ RETRY:
      }
  
  test_over:
