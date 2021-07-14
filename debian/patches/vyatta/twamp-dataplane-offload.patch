@@ -182,6 +182,25 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
  
      if (owp_alrm) {
          OWPError(ep->cntrl->ctx,OWPErrINFO,OWPErrUNKNOWN,
+@@ -3923,6 +3959,18 @@ _OWPEndpointInitHook(
+     }
+ 
+     /*
++     * Can we offload processing of the data stream to the dataplane?
++     *
++     * This needs to take place before the fork used to create the
++     * process used to handle the test stream itself. It ensures the
++     * offload state is available to WriteSessionState().
++     */
++    if (vyatta_endpoint_session_start(ep) < 0)
++        ep->offload = False;
++    else
++        ep->offload = True;
++
++    /*
+      * call sigprocmask to block signals before the fork.
+      * (This ensures no race condition.)
+      * First we set the new sig_handler for the child, saving the
 --- a/configure.ac
 +++ b/configure.ac
 @@ -214,9 +214,24 @@ fi
@@ -979,28 +998,3 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
      int                 sockfd;
      int                 skiprecfd;
      off_t               skiprecsize;
---- a/owamp/sapi.c
-+++ b/owamp/sapi.c
-@@ -30,6 +30,7 @@
- #include <sys/stat.h>
- #include <fcntl.h>
- 
-+#include "owamp/vyatta-endpoint.h"
- 
- static int
- OpenSocket(
-@@ -892,6 +893,14 @@ OWPProcessTestRequestTW(
-     }
- 
-     /*
-+     * Can we offload processing of the data stream to the dataplane?
-+     */
-+    if (vyatta_endpoint_session_start(tsession->endpoint) < 0)
-+        tsession->endpoint->offload = False;
-+    else
-+        tsession->endpoint->offload = True;
-+
-+    /*
-      * Add tsession to list of tests managed by this control connection.
-      */
-     tsession->next = cntrl->tests;
