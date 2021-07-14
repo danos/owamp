@@ -215,7 +215,7 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
  twampd_DEPENDENCIES = $(owampd_DEPENDENCIES)
 --- /dev/null
 +++ b/owampd/vyatta-dataplane.c
-@@ -0,0 +1,645 @@
+@@ -0,0 +1,648 @@
 +/*-
 + * Copyright (c) 2021, AT&T Intellectual Property.  All rights reserved.
 + * All rights reserved.
@@ -672,6 +672,7 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
 +	twampcmd_response__free_unpacked(response, NULL);
 +	dataplane_console_close(&s);
 +	free(request);
++	zsys_shutdown();
 +	return rc;
 +}
 +
@@ -707,6 +708,7 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
 +	twampcmd_response__free_unpacked(response, NULL);
 +	dataplane_console_close(&s);
 +	free(request);
++	zsys_shutdown();
 +	return rc;
 +}
 +
@@ -742,6 +744,7 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
 +	twampcmd_response__free_unpacked(response, NULL);
 +	dataplane_console_close(&s);
 +	free(request);
++	zsys_shutdown();
 +	return rc;
 +}
 +
