@@ -1,3 +1,16 @@
+owamp (4.2.1-1vyatta6) unstable; urgency=medium
+
+  * twamp: forcibly shutdown ZMQ (Fixes: VRVDR-55606)
+  * twamp: poll the dataplane session counters more frequently
+    (Fixes: VRVDR-55606)
+  * twamp: ensure offload setting is defined before fork (Fixes: VRVDR-55606)
+  * twamp: reduce the number of log messages associated with offload
+    (Fixes: VRVDR-55606)
+  * twamp: allow vyatta_endpoint_session_end() to be called multiple times
+    (Fixes: VRVDR-55606)
+
+ -- Mark Gillott <mgillott@vyatta-att-mail.com>  Tue, 20 Jul 2021 12:00:04 +0100
+
 owamp (4.2.1-1vyatta5) unstable; urgency=medium
 
   * twamp: run twampd as part of the "adm" group (Fixes: VRVDR-53580)
