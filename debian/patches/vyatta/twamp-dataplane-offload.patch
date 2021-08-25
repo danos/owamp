@@ -212,7 +212,7 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
          goto done;
 --- a/configure.ac
 +++ b/configure.ac
-@@ -214,9 +214,24 @@ fi
+@@ -214,9 +214,26 @@ fi
  AM_CONDITIONAL([HAVE_MAN2HTML], test x$do_man2html = xtrue)
  
  PKG_CHECK_MODULES([CHECK], [check], [have_check=true], [have_check=false])
@@ -220,6 +220,8 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
 +PKG_CHECK_MODULES(JSON_C, [json-c])
 +PKG_CHECK_MODULES(LIBCZMQ, [libczmq >= 3.0.2])
 +PKG_CHECK_MODULES(LIBZMQ, [libzmq >= 4.0.4])
++PKG_CHECK_MODULES([LIBVPLANED], [libvplaned])
++PKG_CHECK_MODULES([VYATTA_DATAPLANE_PROTO_C], [vyatta-dataplane-proto-c])
 +PKG_CHECK_MODULES([PROTOBUF_C], [libprotobuf-c >= 1.0.0])
 +AC_ARG_VAR([PROTOC_C], [protobuf compiler command])
 +AC_PATH_PROG([PROTOC_C], [protoc-c], [],
@@ -239,17 +241,15 @@ Offload the processing of TWAMP test packets to the vyatta dataplane.
  AC_OUTPUT([Makefile owamp/Makefile owampd/Makefile owping/Makefile powstream/Makefile conf/Makefile test/Makefile doc/Makefile selinux/Makefile owamp.spec])
 --- a/owampd/Makefile.am
 +++ b/owampd/Makefile.am
-@@ -28,6 +28,10 @@ owampd_SOURCES	= owampdP.h owampd.c poli
+@@ -28,6 +28,7 @@ owampd_SOURCES	= owampdP.h owampd.c poli
  owampd_LDADD	= $(OWPLIBS) $(MALLOCDEBUGLIBS) -lI2util
  owampd_DEPENDENCIES = $(OWPLIBDEPS) $(I2UTILLIBDEPS)
  
 -twampd_SOURCES	= owampdP.h twampd.c policy.h policy.c
-+PKGLIST		= vyatta-dataplane-proto-c libvplaned libczmq libzmq
-+
+-twampd_LDADD	= $(owampd_LDADD)
 +twampd_SOURCES	= owampdP.h twampd.c policy.h policy.c vyatta-dataplane.c
-+twampd_CFLAGS   = $(shell pkg-config --cflags $(PKGLIST))
-+twampd_LDFLAGS  = $(shell pkg-config --libs $(PKGLIST))
- twampd_LDADD	= $(owampd_LDADD)
++twampd_CFLAGS   = $(VYATTA_DATAPLANE_PROTO_C_CFLAGS) $(LIBVPLANED_CFLAGS) $(LIBCZMQ_CFLAGS) $(LIBZMQ_CFLAGS)
++twampd_LDADD	= $(owampd_LDADD) $(VYATTA_DATAPLANE_PROTO_C_LIBS) $(LIBVPLANED_LIBS) $(LIBCZMQ_LIBS) $(LIBZMQ_LIBS)
  twampd_DEPENDENCIES = $(owampd_DEPENDENCIES)
 --- /dev/null
 +++ b/owampd/vyatta-dataplane.c
