@@ -17,6 +17,9 @@
 export DEB_BUILD_MAINT_OPTIONS = reproducible=-timeless
 export DEB_BUILD_OPTIONS = noopt
 
+# Restore pre-GCC 10 behavior
+export DEB_CFLAGS_MAINT_APPEND = -fcommon
+
 # This has to be exported to make some magic below work.
 export DH_OPTIONS
 
