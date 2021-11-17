@@ -1,3 +1,11 @@
+owamp (4.2.1-1vyatta7) unstable; urgency=medium
+
+  [ Daniel Gollub ]
+  * Correct order of linking libraries
+  * Avoid -fno-common with GCC 10
+
+ -- Mark Gillott <mgillott@vyatta-att-mail.com>  Wed, 17 Nov 2021 09:28:33 +0000
+
 owamp (4.2.1-1vyatta6) unstable; urgency=medium
 
   * twamp: forcibly shutdown ZMQ (Fixes: VRVDR-55606)
